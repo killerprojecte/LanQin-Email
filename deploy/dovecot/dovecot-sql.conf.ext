@@ -1,0 +1,5 @@
+driver = sqlite
+connect = /data/lanqin.db
+default_pass_scheme = BLF-CRYPT
+password_query = SELECT address AS user, password_hash AS password FROM mailboxes WHERE address = '%u' AND status = 'active'
+user_query = SELECT '/var/mail/vhosts/' || substr(address, instr(address, '@') + 1) || '/' || local_part AS home, 'maildir:/var/mail/vhosts/' || substr(address, instr(address, '@') + 1) || '/' || local_part || '/Maildir' AS mail, 5000 AS uid, 5000 AS gid FROM mailboxes WHERE address = '%u' AND status = 'active'

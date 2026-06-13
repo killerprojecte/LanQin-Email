@@ -1,0 +1,30 @@
+compatibility_level = 3.6
+myhostname = mail.example.com
+myorigin = $myhostname
+mydestination = localhost
+inet_interfaces = all
+inet_protocols = all
+
+# SQLite maps read the same LanQin DB created by the Go API.
+virtual_mailbox_domains = sqlite:/etc/postfix/sqlite-domains.cf
+virtual_mailbox_maps = sqlite:/etc/postfix/sqlite-mailboxes.cf
+virtual_alias_maps = sqlite:/etc/postfix/sqlite-aliases.cf
+virtual_transport = lmtp:inet:dovecot:24
+virtual_mailbox_base = /var/mail/vhosts
+
+smtpd_banner = $myhostname ESMTP LanQin Email
+smtpd_relay_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination
+smtpd_recipient_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination
+
+# Submission auth via Dovecot.
+smtpd_sasl_type = dovecot
+smtpd_sasl_path = inet:dovecot:12345
+smtpd_sasl_auth_enable = yes
+smtpd_tls_security_level = may
+smtp_tls_security_level = may
+
+# DKIM milter.
+milter_protocol = 6
+milter_default_action = accept
+smtpd_milters = inet:opendkim:8891
+non_smtpd_milters = inet:opendkim:8891
