@@ -149,3 +149,16 @@ html.theme-transition::before {
   background-color: hsl(var(--primary) / 0.15);
   color: hsl(var(--foreground));
 }
+
+/* ===== 隐藏调试工具浮层 ===== */
+#__vue-devtools-container__,
+#__vue-devtools-overlay__,
+#__vue-devtools-frame__,
+#__nuxt-devtools__,
+vue-devtools,
+vue-devtools-anchor,
+[data-vue-devtools],
+[id*="vue-devtools"],
+[class*="vue-devtools"] {
+  display: none !important;
+}

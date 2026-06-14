@@ -30,11 +30,15 @@ func (a *App) Router() http.Handler {
 	})
 
 	r.Route("/api", func(r chi.Router) {
+		r.Get("/public/settings", a.handlePublicSettings)
 		r.Post("/auth/login", a.handleLogin)
 		r.Post("/auth/logout", a.handleLogout)
 		r.With(a.requireAuth).Get("/me", a.handleMe)
 		r.With(a.requireAuth).Post("/me/profile", a.handleUpdateProfile)
 		r.With(a.requireAuth).Post("/me/password", a.handleChangePassword)
+		r.With(a.requireAuth).Post("/me/2fa/setup", a.handleTwoFactorSetup)
+		r.With(a.requireAuth).Post("/me/2fa/enable", a.handleTwoFactorEnable)
+		r.With(a.requireAuth).Post("/me/2fa/disable", a.handleTwoFactorDisable)
 		r.With(a.requireAuth).Get("/me/contacts", a.handleListContacts)
 		r.With(a.requireAuth).Post("/me/contacts", a.handleCreateContact)
 		r.With(a.requireAuth).Delete("/me/contacts/{id}", a.handleDeleteContact)
@@ -65,12 +69,33 @@ func (a *App) Router() http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(a.requireAuth)
 			r.Use(a.requireAdmin)
+			r.Get("/admin/overview", a.handleAdminOverview)
+			r.Get("/admin/users", a.handleListUsers)
+			r.Post("/admin/users", a.handleCreateUser)
+			r.Post("/admin/users/{id}", a.handleUpdateUser)
+			r.Post("/admin/users/{id}/password", a.handleResetUserPassword)
+			r.Delete("/admin/users/{id}", a.handleDeleteUser)
 			r.Get("/admin/domains", a.handleListDomains)
 			r.Post("/admin/domains", a.handleCreateDomain)
+			r.Post("/admin/domains/{id}", a.handleUpdateDomain)
+			r.Delete("/admin/domains/{id}", a.handleDeleteDomain)
 			r.Get("/admin/mailboxes", a.handleListMailboxes)
 			r.Post("/admin/mailboxes", a.handleCreateMailbox)
+			r.Post("/admin/mailboxes/{id}", a.handleUpdateMailbox)
+			r.Delete("/admin/mailboxes/{id}", a.handleDeleteMailbox)
 			r.Get("/admin/aliases", a.handleListAliases)
 			r.Post("/admin/aliases", a.handleCreateAlias)
+			r.Post("/admin/aliases/{id}", a.handleUpdateAlias)
+			r.Delete("/admin/aliases/{id}", a.handleDeleteAlias)
+			r.Get("/admin/messages", a.handleAdminMessages)
+			r.Get("/admin/messages/{id}", a.handleAdminMessage)
+			r.Get("/admin/attachments/{id}", a.handleAdminAttachment)
+			r.Get("/admin/settings", a.handleGetSystemSettings)
+			r.Post("/admin/settings", a.handleUpdateSystemSettings)
+			r.Post("/admin/settings/test-smtp", a.handleTestSMTP)
+			r.Get("/admin/mail-templates", a.handleListMailTemplates)
+			r.Post("/admin/mail-templates/{key}", a.handleUpdateMailTemplate)
+			r.Post("/admin/mail-templates/{key}/reset", a.handleResetMailTemplate)
 			r.Get("/admin/domains/{id}/dns-records", a.handleDNSRecords)
 			r.Post("/admin/domains/{id}/check-dns", a.handleDNSCheck)
 		})
@@ -99,11 +124,42 @@ func (a *App) corsMiddleware(next http.Handler) http.Handler {
 
 func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email          string `json:"email"`
+		Password       string `json:"password"`
+		TurnstileToken string `json:"turnstileToken"`
+		ChallengeToken string `json:"challengeToken"`
+		TwoFactorCode  string `json:"twoFactorCode"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		badRequest(w, err)
+		return
+	}
+	if strings.TrimSpace(req.ChallengeToken) != "" {
+		challenge, err := a.loginChallengeByToken(r.Context(), req.ChallengeToken)
+		if err != nil {
+			respondError(w, http.StatusUnauthorized, "invalid verification challenge")
+			return
+		}
+		user, secret, err := a.loadUserAuthByID(r.Context(), challenge.UserID)
+		if err != nil || user.Disabled || !user.TwoFactorEnabled || strings.TrimSpace(secret) == "" {
+			a.deleteLoginChallenge(r.Context(), challenge.ID)
+			respondError(w, http.StatusUnauthorized, "invalid verification challenge")
+			return
+		}
+		if !verifyTOTP(secret, req.TwoFactorCode, a.now().UTC()) {
+			respondError(w, http.StatusUnauthorized, "invalid verification code")
+			return
+		}
+		a.deleteLoginChallenge(r.Context(), challenge.ID)
+		if err := a.issueSession(w, r, user.ID); err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to create session")
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]any{"user": user})
+		return
+	}
+	if err := a.verifyTurnstile(r.Context(), req.TurnstileToken, r.RemoteAddr); err != nil {
+		respondError(w, http.StatusUnauthorized, "human verification failed")
 		return
 	}
 	email := normalizeEmail(req.Email)
@@ -116,25 +172,19 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusUnauthorized, "invalid email or password")
 		return
 	}
-	token := randomToken()
-	sessionID := newID("ses")
-	expires := a.now().UTC().Add(time.Duration(a.cfg.SessionTTLHours) * time.Hour)
-	_, err = a.db.ExecContext(r.Context(), `INSERT INTO sessions(id,user_id,token_hash,expires_at,created_at) VALUES(?,?,?,?,?)`,
-		sessionID, user.ID, hashToken(token), expires.Format(time.RFC3339Nano), a.now().UTC().Format(time.RFC3339Nano))
-	if err != nil {
+	if a.cfg.TwoFactorEnabled && user.TwoFactorEnabled {
+		challengeToken, err := a.createLoginChallenge(r.Context(), user.ID)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to create verification challenge")
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]any{"twoFactorRequired": true, "challengeToken": challengeToken})
+		return
+	}
+	if err := a.issueSession(w, r, user.ID); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to create session")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     a.cfg.CookieName,
-		Value:    token,
-		Path:     "/",
-		Expires:  expires,
-		MaxAge:   int(time.Until(expires).Seconds()),
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		Secure:   !a.cfg.AllowInsecureHTTP,
-	})
 	respondJSON(w, http.StatusOK, map[string]any{"user": user})
 }
 
@@ -265,16 +315,17 @@ func (a *App) authenticateRequest(r *http.Request) (*User, error) {
 	if err != nil || cookie.Value == "" {
 		return nil, errors.New("no session")
 	}
-	row := a.db.QueryRowContext(r.Context(), `SELECT u.id,u.email,u.display_name,u.role,u.disabled,u.created_at
+	row := a.db.QueryRowContext(r.Context(), `SELECT u.id,u.email,u.display_name,u.role,u.disabled,u.two_factor_enabled,u.created_at
 		FROM sessions s JOIN users u ON u.id=s.user_id
 		WHERE s.token_hash=? AND s.expires_at > ?`, hashToken(cookie.Value), a.now().UTC().Format(time.RFC3339Nano))
 	var u User
-	var disabled int
+	var disabled, twoFactorEnabled int
 	var created string
-	if err := row.Scan(&u.ID, &u.Email, &u.DisplayName, &u.Role, &disabled, &created); err != nil {
+	if err := row.Scan(&u.ID, &u.Email, &u.DisplayName, &u.Role, &disabled, &twoFactorEnabled, &created); err != nil {
 		return nil, err
 	}
 	u.Disabled = intBool(disabled)
+	u.TwoFactorEnabled = intBool(twoFactorEnabled)
 	u.CreatedAt = parseTime(created)
 	if u.Disabled {
 		return nil, errors.New("disabled")
@@ -283,34 +334,36 @@ func (a *App) authenticateRequest(r *http.Request) (*User, error) {
 }
 
 func (a *App) userByEmail(ctx context.Context, email string) (*User, string, error) {
-	row := a.db.QueryRowContext(ctx, `SELECT id,email,display_name,role,password_hash,disabled,created_at FROM users WHERE email=?`, email)
+	row := a.db.QueryRowContext(ctx, `SELECT id,email,display_name,role,password_hash,disabled,two_factor_enabled,created_at FROM users WHERE email=?`, email)
 	var u User
 	var passwordHash string
-	var disabled int
+	var disabled, twoFactorEnabled int
 	var created string
-	if err := row.Scan(&u.ID, &u.Email, &u.DisplayName, &u.Role, &passwordHash, &disabled, &created); err != nil {
+	if err := row.Scan(&u.ID, &u.Email, &u.DisplayName, &u.Role, &passwordHash, &disabled, &twoFactorEnabled, &created); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, "", errNotFound
 		}
 		return nil, "", err
 	}
 	u.Disabled = intBool(disabled)
+	u.TwoFactorEnabled = intBool(twoFactorEnabled)
 	u.CreatedAt = parseTime(created)
 	return &u, passwordHash, nil
 }
 
 func (a *App) userByID(ctx context.Context, id string) (*User, error) {
-	row := a.db.QueryRowContext(ctx, `SELECT id,email,display_name,role,disabled,created_at FROM users WHERE id=?`, id)
+	row := a.db.QueryRowContext(ctx, `SELECT id,email,display_name,role,disabled,two_factor_enabled,created_at FROM users WHERE id=?`, id)
 	var u User
-	var disabled int
+	var disabled, twoFactorEnabled int
 	var created string
-	if err := row.Scan(&u.ID, &u.Email, &u.DisplayName, &u.Role, &disabled, &created); err != nil {
+	if err := row.Scan(&u.ID, &u.Email, &u.DisplayName, &u.Role, &disabled, &twoFactorEnabled, &created); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, errNotFound
 		}
 		return nil, err
 	}
 	u.Disabled = intBool(disabled)
+	u.TwoFactorEnabled = intBool(twoFactorEnabled)
 	u.CreatedAt = parseTime(created)
 	return &u, nil
 }

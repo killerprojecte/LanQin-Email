@@ -2,7 +2,8 @@ import * as React from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import type { ImperativePanelHandle } from "react-resizable-panels"
 import { useNavigate, useSearchParams } from "react-router-dom"
-import { ArrowLeft, BarChart3, Ban, Contact, Copy, LogOut, Mail, MailCheck, MailX, Moon, PanelLeftClose, PanelLeftOpen, RefreshCcw, Settings, ShieldCheck, SlidersHorizontal, Sun, Trash2 } from "lucide-react"
+import { ArrowLeft, BarChart3, Ban, Contact, Copy, KeyRound, LogOut, Mail, MailCheck, MailX, Moon, PanelLeftClose, PanelLeftOpen, RefreshCcw, Settings, ShieldCheck, SlidersHorizontal, Sun, Trash2 } from "lucide-react"
+import { QRCodeSVG } from "qrcode.react"
 import { api, Mailbox, MailStats } from "@/lib/api"
 import { cn, formatBytes } from "@/lib/utils"
 import { applyTheme, getInitialTheme } from "@/lib/theme"
@@ -40,6 +41,7 @@ export function ProfilePage() {
   const [params, setParams] = useSearchParams()
   const { toast } = useToast()
   const passwordFormRef = React.useRef<HTMLFormElement>(null)
+  const twoFactorFormRef = React.useRef<HTMLFormElement>(null)
   const sidebarPanelRef = React.useRef<ImperativePanelHandle>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = React.useState(false)
   const [mailboxId, setMailboxId] = React.useState(() => localStorage.getItem("lanqin:selected-mailbox") || "")
@@ -72,6 +74,21 @@ export function ProfilePage() {
     },
     onSuccess: () => { passwordFormRef.current?.reset(); toast({ title: "密码已更新" }) },
     onError: (error) => toast({ title: "修改失败", description: error.message }),
+  })
+  const setupTwoFactor = useMutation({
+    mutationFn: api.setupTwoFactor,
+    onSuccess: () => toast({ title: "双因素密钥已生成" }),
+    onError: (error) => toast({ title: "生成失败", description: error.message }),
+  })
+  const enableTwoFactor = useMutation({
+    mutationFn: (form: FormData) => api.enableTwoFactor(String(form.get("code") || "")),
+    onSuccess: (data) => { qc.setQueryData(["me"], data); setupTwoFactor.reset(); twoFactorFormRef.current?.reset(); toast({ title: "双因素认证已启用" }) },
+    onError: (error) => toast({ title: "启用失败", description: error.message }),
+  })
+  const disableTwoFactor = useMutation({
+    mutationFn: (form: FormData) => api.disableTwoFactor(String(form.get("code") || "")),
+    onSuccess: (data) => { qc.setQueryData(["me"], data); twoFactorFormRef.current?.reset(); toast({ title: "双因素认证已关闭" }) },
+    onError: (error) => toast({ title: "关闭失败", description: error.message }),
   })
   const createContact = useMutation({
     mutationFn: (form: FormData) => api.createContact({ name: String(form.get("name") || ""), email: String(form.get("email") || ""), note: String(form.get("note") || "") }),
@@ -158,11 +175,11 @@ export function ProfilePage() {
     if (tab === "rules") return <RulesSection items={rules.data?.items || []} mailboxes={mailboxes.data?.items || []} mailboxId={ruleMailboxId} action={ruleAction} onMailboxChange={setRuleMailboxId} onActionChange={setRuleAction} onCreate={(form) => createRule.mutate(form)} onDelete={(id) => deleteRule.mutate(id)} pending={createRule.isPending} />
     if (tab === "blocked") return <BlockedSection items={blocked.data?.items || []} mailboxes={mailboxes.data?.items || []} mailboxId={blockedMailboxId} spamCount={stats.data?.byFolder.find((f) => f.role === "spam")?.count || 0} onMailboxChange={setBlockedMailboxId} onCreate={(form) => createBlocked.mutate(form)} onDelete={(id) => deleteBlocked.mutate(id)} pending={createBlocked.isPending} />
     if (tab === "stats") return <StatsSection stats={stats.data} mailbox={selectedMailbox} onRefresh={() => stats.refetch()} />
-    return <ProfileOverview user={user!} profile={profile} password={password} passwordFormRef={passwordFormRef} stats={stats.data} />
+    return <ProfileOverview user={user!} profile={profile} password={password} passwordFormRef={passwordFormRef} stats={stats.data} twoFactorFormRef={twoFactorFormRef} setupTwoFactor={setupTwoFactor} enableTwoFactor={enableTwoFactor} disableTwoFactor={disableTwoFactor} onCopy={copy} />
   }
 }
 
-function ProfileOverview({ user, profile, password, passwordFormRef, stats }: { user: { email: string; displayName: string; role: string; disabled: boolean; createdAt: string }; profile: { mutate: (form: FormData) => void; isPending: boolean }; password: { mutate: (form: FormData) => void; isPending: boolean }; passwordFormRef: React.RefObject<HTMLFormElement>; stats?: MailStats }) {
+function ProfileOverview({ user, profile, password, passwordFormRef, stats, twoFactorFormRef, setupTwoFactor, enableTwoFactor, disableTwoFactor, onCopy }: { user: { email: string; displayName: string; role: string; disabled: boolean; twoFactorEnabled: boolean; createdAt: string }; profile: { mutate: (form: FormData) => void; isPending: boolean }; password: { mutate: (form: FormData) => void; isPending: boolean }; passwordFormRef: React.RefObject<HTMLFormElement>; stats?: MailStats; twoFactorFormRef: React.RefObject<HTMLFormElement>; setupTwoFactor: { data?: { secret: string; otpauthUrl: string }; mutate: () => void; reset: () => void; isPending: boolean }; enableTwoFactor: { mutate: (form: FormData) => void; isPending: boolean }; disableTwoFactor: { mutate: (form: FormData) => void; isPending: boolean }; onCopy: (text: string) => void }) {
   return (
     <div className="space-y-6">
       <Card>
@@ -203,6 +220,67 @@ function ProfileOverview({ user, profile, password, passwordFormRef, stats }: { 
               <span>{new Date(user.createdAt).toLocaleString()}</span>
             </div>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>双因素认证</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between rounded-lg border p-3">
+            <div className="flex items-center gap-2 text-sm">
+              <KeyRound className="h-4 w-4" />
+              认证状态
+            </div>
+            <Badge variant={user.twoFactorEnabled ? "default" : "secondary"}>{user.twoFactorEnabled ? "已启用" : "未启用"}</Badge>
+          </div>
+
+          {!user.twoFactorEnabled && !setupTwoFactor.data && (
+            <Button onClick={() => setupTwoFactor.mutate()} disabled={setupTwoFactor.isPending}>{setupTwoFactor.isPending ? "生成中..." : "启用双因素认证"}</Button>
+          )}
+
+          {!user.twoFactorEnabled && setupTwoFactor.data && (
+            <form ref={twoFactorFormRef} className="space-y-4" onSubmit={(e) => { e.preventDefault(); enableTwoFactor.mutate(new FormData(e.currentTarget)) }}>
+              <div className="grid gap-4 lg:grid-cols-[220px_minmax(0,1fr)]">
+                <div className="flex justify-center rounded-lg border bg-white p-4">
+                  <QRCodeSVG value={setupTwoFactor.data.otpauthUrl} size={184} level="M" />
+                </div>
+                <div className="space-y-4">
+                  <Field label="密钥">
+                    <div className="flex gap-2">
+                      <Input value={setupTwoFactor.data.secret} readOnly />
+                      <Button type="button" variant="outline" onClick={() => onCopy(setupTwoFactor.data!.secret)}><Copy className="h-4 w-4" />复制</Button>
+                    </div>
+                  </Field>
+                  <Field label="绑定地址">
+                    <div className="flex gap-2">
+                      <Input value={setupTwoFactor.data.otpauthUrl} readOnly />
+                      <Button type="button" variant="outline" onClick={() => onCopy(setupTwoFactor.data!.otpauthUrl)}><Copy className="h-4 w-4" />复制</Button>
+                    </div>
+                  </Field>
+                </div>
+              </div>
+              <Field label="验证码">
+                <Input name="code" inputMode="numeric" autoComplete="one-time-code" minLength={6} maxLength={6} required />
+              </Field>
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="outline" onClick={() => setupTwoFactor.reset()}>取消</Button>
+                <Button disabled={enableTwoFactor.isPending}>{enableTwoFactor.isPending ? "启用中..." : "确认启用"}</Button>
+              </div>
+            </form>
+          )}
+
+          {user.twoFactorEnabled && (
+            <form ref={twoFactorFormRef} className="space-y-4" onSubmit={(e) => { e.preventDefault(); disableTwoFactor.mutate(new FormData(e.currentTarget)) }}>
+              <Field label="当前验证码">
+                <Input name="code" inputMode="numeric" autoComplete="one-time-code" minLength={6} maxLength={6} required />
+              </Field>
+              <div className="flex justify-end">
+                <Button variant="destructive" disabled={disableTwoFactor.isPending}>{disableTwoFactor.isPending ? "关闭中..." : "关闭双因素认证"}</Button>
+              </div>
+            </form>
+          )}
         </CardContent>
       </Card>
 

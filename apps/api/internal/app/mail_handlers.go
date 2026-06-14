@@ -23,23 +23,24 @@ type AttachmentInput struct {
 }
 
 type storedMessage struct {
-	MailboxID  string
-	FolderID   string
-	MessageUID string
-	MessageID  string
-	Subject    string
-	From       string
-	To         []string
-	CC         []string
-	BCC        []string
-	SentAt     time.Time
-	ReceivedAt time.Time
-	Snippet    string
-	BodyText   string
-	BodyHTML   string
-	IsRead     bool
-	IsStarred  bool
-	RawPath    string
+	MailboxID     string
+	FolderID      string
+	RecipientAddr string
+	MessageUID    string
+	MessageID     string
+	Subject       string
+	From          string
+	To            []string
+	CC            []string
+	BCC           []string
+	SentAt        time.Time
+	ReceivedAt    time.Time
+	Snippet       string
+	BodyText      string
+	BodyHTML      string
+	IsRead        bool
+	IsStarred     bool
+	RawPath       string
 }
 
 func (a *App) handleMyMailboxes(w http.ResponseWriter, r *http.Request) {
@@ -225,12 +226,36 @@ func (a *App) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Development/local-domain delivery: if a recipient exists as a local mailbox, write an Inbox copy.
+	// Development/local-domain delivery: known local recipients go to their Inbox.
+	// When catch-all is enabled, unknown local recipients are stored as unregistered
+	// messages visible only in the admin "全部邮件" view.
 	localRecipients := append(req.To, req.CC...)
 	localRecipients = append(localRecipients, req.BCC...)
 	for _, rcpt := range localRecipients {
 		rcptMailbox, err := a.mailboxByAddress(r.Context(), rcpt)
 		if err != nil {
+			if !a.cfg.CatchAllEnabled || !a.isLocalDomainAddress(r.Context(), rcpt) {
+				continue
+			}
+			copyMsg := base
+			copyMsg.MailboxID = ""
+			copyMsg.FolderID = ""
+			copyMsg.RecipientAddr = normalizeEmail(rcpt)
+			copyMsg.MessageUID = newID("uid")
+			copyMsg.IsRead = false
+			_, _ = a.insertMessage(r.Context(), copyMsg, req.Attachments)
+			continue
+		}
+		if rcptMailbox.Status != "active" {
+			if a.cfg.CatchAllEnabled && a.isLocalDomainAddress(r.Context(), rcpt) {
+				copyMsg := base
+				copyMsg.MailboxID = ""
+				copyMsg.FolderID = ""
+				copyMsg.RecipientAddr = normalizeEmail(rcpt)
+				copyMsg.MessageUID = newID("uid")
+				copyMsg.IsRead = false
+				_, _ = a.insertMessage(r.Context(), copyMsg, req.Attachments)
+			}
 			continue
 		}
 		inboxID, err := a.ensureFolder(r.Context(), rcptMailbox.ID, "Inbox")
@@ -249,6 +274,16 @@ func (a *App) handleMailSend(w http.ResponseWriter, r *http.Request) {
 
 	msg, _ := a.messageByID(r.Context(), sentID, true)
 	respondJSON(w, http.StatusCreated, msg)
+}
+
+func (a *App) isLocalDomainAddress(ctx context.Context, address string) bool {
+	parts := strings.Split(normalizeEmail(address), "@")
+	if len(parts) != 2 || parts[1] == "" {
+		return false
+	}
+	var count int
+	_ = a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM domains WHERE name=? AND status='active'`, parts[1]).Scan(&count)
+	return count > 0
 }
 
 func (a *App) handleMarkRead(w http.ResponseWriter, r *http.Request) {
@@ -369,6 +404,27 @@ func (a *App) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, f)
 }
 
+func (a *App) handleAdminAttachment(w http.ResponseWriter, r *http.Request) {
+	attID := chi.URLParam(r, "id")
+	row := a.db.QueryRowContext(r.Context(), `SELECT filename,content_type,size_bytes,storage_path FROM attachments WHERE id=?`, attID)
+	var filename, contentType, path string
+	var size int64
+	if err := row.Scan(&filename, &contentType, &size, &path); err != nil {
+		respondError(w, http.StatusNotFound, "attachment not found")
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "attachment file missing")
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(filename, `"`, "")+`"`)
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	_, _ = io.Copy(w, f)
+}
+
 func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -440,8 +496,8 @@ func (a *App) loadMessageForRequest(r *http.Request, id string, includeBody bool
 }
 
 func (a *App) messageByID(ctx context.Context, id string, includeBody bool) (*MailMessage, error) {
-	row := a.db.QueryRowContext(ctx, `SELECT m.id,m.mailbox_id,m.folder_id,f.name,m.message_uid,m.message_id,m.subject,m.from_addr,m.to_addrs,m.cc_addrs,m.bcc_addrs,m.sent_at,m.received_at,m.snippet,m.body_text,m.body_html,m.is_read,m.is_starred,m.has_attachments,m.size_bytes
-		FROM messages m JOIN folders f ON f.id=m.folder_id WHERE m.id=?`, id)
+	row := a.db.QueryRowContext(ctx, `SELECT m.id,COALESCE(m.mailbox_id,''),COALESCE(m.recipient_addr,''),COALESCE(m.folder_id,''),COALESCE(f.name,'Unregistered'),m.message_uid,m.message_id,m.subject,m.from_addr,m.to_addrs,m.cc_addrs,m.bcc_addrs,m.sent_at,m.received_at,m.snippet,m.body_text,m.body_html,m.is_read,m.is_starred,m.has_attachments,m.size_bytes
+		FROM messages m LEFT JOIN folders f ON f.id=m.folder_id WHERE m.id=?`, id)
 	msg, err := scanMessageFull(row, includeBody)
 	if err != nil {
 		return nil, err
@@ -466,8 +522,16 @@ func (a *App) insertMessage(ctx context.Context, msg storedMessage, attachments 
 			size += int64(len(decoded))
 		}
 	}
-	_, err := a.db.ExecContext(ctx, `INSERT INTO messages(id,mailbox_id,folder_id,message_uid,message_id,subject,from_addr,to_addrs,cc_addrs,bcc_addrs,sent_at,received_at,snippet,body_text,body_html,is_read,is_starred,has_attachments,size_bytes,raw_path,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, msg.MailboxID, msg.FolderID, msg.MessageUID, msg.MessageID, msg.Subject, msg.From, jsonEncode(msg.To), jsonEncode(msg.CC), jsonEncode(msg.BCC), msg.SentAt.Format(time.RFC3339Nano), msg.ReceivedAt.Format(time.RFC3339Nano), msg.Snippet, msg.BodyText, msg.BodyHTML, boolInt(msg.IsRead), boolInt(msg.IsStarred), boolInt(hasAttachments), size, msg.RawPath, now, now)
+	var mailboxID, folderID any
+	if strings.TrimSpace(msg.MailboxID) != "" {
+		mailboxID = msg.MailboxID
+	}
+	if strings.TrimSpace(msg.FolderID) != "" {
+		folderID = msg.FolderID
+	}
+	recipientAddr := normalizeEmail(msg.RecipientAddr)
+	_, err := a.db.ExecContext(ctx, `INSERT INTO messages(id,mailbox_id,folder_id,recipient_addr,message_uid,message_id,subject,from_addr,to_addrs,cc_addrs,bcc_addrs,sent_at,received_at,snippet,body_text,body_html,is_read,is_starred,has_attachments,size_bytes,raw_path,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, mailboxID, folderID, recipientAddr, msg.MessageUID, msg.MessageID, msg.Subject, msg.From, jsonEncode(msg.To), jsonEncode(msg.CC), jsonEncode(msg.BCC), msg.SentAt.Format(time.RFC3339Nano), msg.ReceivedAt.Format(time.RFC3339Nano), msg.Snippet, msg.BodyText, msg.BodyHTML, boolInt(msg.IsRead), boolInt(msg.IsStarred), boolInt(hasAttachments), size, msg.RawPath, now, now)
 	if err != nil {
 		return "", err
 	}
@@ -541,6 +605,20 @@ func (a *App) deleteMessageFiles(ctx context.Context, messageID string) {
 
 type messageSummaryScanner interface{ Scan(dest ...any) error }
 
+func scanAdminMessageSummary(row messageSummaryScanner) (MailMessage, error) {
+	var msg MailMessage
+	var toJSON, ccJSON, bccJSON, sent, received string
+	var read, starred, hasAtt int
+	err := row.Scan(&msg.ID, &msg.MailboxID, &msg.MailboxAddress, &msg.OwnerEmail, &msg.RecipientAddr, &msg.FolderID, &msg.Folder, &msg.MessageUID, &msg.MessageID, &msg.Subject, &msg.From, &toJSON, &ccJSON, &bccJSON, &sent, &received, &msg.Snippet, &read, &starred, &hasAtt, &msg.SizeBytes)
+	if err != nil {
+		return msg, err
+	}
+	msg.To, msg.CC, msg.BCC = jsonDecodeSlice(toJSON), jsonDecodeSlice(ccJSON), jsonDecodeSlice(bccJSON)
+	msg.SentAt, msg.ReceivedAt = parseTime(sent), parseTime(received)
+	msg.IsRead, msg.IsStarred, msg.HasAttachments = intBool(read), intBool(starred), intBool(hasAtt)
+	return msg, nil
+}
+
 func scanMessageSummary(row messageSummaryScanner, folder string) (MailMessage, error) {
 	var msg MailMessage
 	var toJSON, ccJSON, bccJSON, sent, received string
@@ -561,7 +639,7 @@ func scanMessageFull(row messageSummaryScanner, includeBody bool) (MailMessage, 
 	var toJSON, ccJSON, bccJSON, sent, received string
 	var read, starred, hasAtt int
 	var bodyText, bodyHTML string
-	err := row.Scan(&msg.ID, &msg.MailboxID, &msg.FolderID, &msg.Folder, &msg.MessageUID, &msg.MessageID, &msg.Subject, &msg.From, &toJSON, &ccJSON, &bccJSON, &sent, &received, &msg.Snippet, &bodyText, &bodyHTML, &read, &starred, &hasAtt, &msg.SizeBytes)
+	err := row.Scan(&msg.ID, &msg.MailboxID, &msg.RecipientAddr, &msg.FolderID, &msg.Folder, &msg.MessageUID, &msg.MessageID, &msg.Subject, &msg.From, &toJSON, &ccJSON, &bccJSON, &sent, &received, &msg.Snippet, &bodyText, &bodyHTML, &read, &starred, &hasAtt, &msg.SizeBytes)
 	if err != nil {
 		return msg, err
 	}

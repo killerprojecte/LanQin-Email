@@ -1,18 +1,21 @@
 package app
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestApp(t *testing.T) *App {
@@ -36,6 +39,70 @@ func newTestApp(t *testing.T) *App {
 	}
 	t.Cleanup(func() { _ = a.Close() })
 	return a
+}
+
+func startFakeSMTP(t *testing.T) (string, string, <-chan string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan string, 1)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go handleFakeSMTPConn(conn, received)
+		}
+	}()
+	host, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return host, port, received
+}
+
+func handleFakeSMTPConn(conn net.Conn, received chan<- string) {
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	_, _ = io.WriteString(conn, "220 lanqin.test ESMTP\r\n")
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return
+		}
+		cmd := strings.ToUpper(strings.TrimSpace(line))
+		switch {
+		case strings.HasPrefix(cmd, "EHLO") || strings.HasPrefix(cmd, "HELO"):
+			_, _ = io.WriteString(conn, "250-lanqin.test\r\n250 OK\r\n")
+		case strings.HasPrefix(cmd, "DATA"):
+			_, _ = io.WriteString(conn, "354 End data with <CR><LF>.<CR><LF>\r\n")
+			var data strings.Builder
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					return
+				}
+				if strings.TrimRight(line, "\r\n") == "." {
+					break
+				}
+				data.WriteString(line)
+			}
+			select {
+			case received <- data.String():
+			default:
+			}
+			_, _ = io.WriteString(conn, "250 OK\r\n")
+		case strings.HasPrefix(cmd, "QUIT"):
+			_, _ = io.WriteString(conn, "221 Bye\r\n")
+			return
+		default:
+			_, _ = io.WriteString(conn, "250 OK\r\n")
+		}
+	}
 }
 
 type testClient struct {
@@ -227,6 +294,120 @@ func TestUserCanSelectMultipleMailboxes(t *testing.T) {
 	}
 }
 
+func TestCatchAllStoresUnregisteredMailForAdminOnly(t *testing.T) {
+	a := newTestApp(t)
+	ts := httptest.NewServer(a.Router())
+	defer ts.Close()
+	admin := &testClient{t: t, server: ts}
+
+	var login map[string]any
+	if code := admin.do("POST", "/api/auth/login", map[string]string{"email": "admin@lanqin.local", "password": "ChangeMe123!"}, &login); code != http.StatusOK {
+		t.Fatalf("login code=%d body=%v", code, login)
+	}
+
+	payload := map[string]any{
+		"to":      []string{"ghost@lanqin.local"},
+		"subject": "should be rejected by default",
+		"text":    "default disabled",
+	}
+	var sent MailMessage
+	if code := admin.do("POST", "/api/mail/send", payload, &sent); code != http.StatusCreated {
+		t.Fatalf("send disabled catch-all code=%d", code)
+	}
+	var list struct {
+		Items []MailMessage `json:"items"`
+	}
+	if code := admin.do("GET", "/api/admin/messages?mailboxId=unregistered&q=should%20be%20rejected", nil, &list); code != http.StatusOK || len(list.Items) != 0 {
+		t.Fatalf("disabled catch-all should not store unregistered mail: code=%d items=%+v", code, list.Items)
+	}
+
+	var settings SystemSettings
+	if code := admin.do("GET", "/api/admin/settings", nil, &settings); code != http.StatusOK {
+		t.Fatalf("get settings code=%d", code)
+	}
+	update := map[string]any{
+		"publicHostname":     settings.PublicHostname,
+		"publicBaseUrl":      settings.PublicBaseURL,
+		"smtpHost":           settings.SMTPHost,
+		"smtpPort":           settings.SMTPPort,
+		"smtpUsername":       settings.SMTPUsername,
+		"smtpPassword":       "",
+		"smtpRequireTls":     settings.SMTPRequireTLS,
+		"maildirRoot":        settings.MaildirRoot,
+		"maildirScanSeconds": settings.MaildirScanSeconds,
+		"sessionTtlHours":    settings.SessionTTLHours,
+		"allowInsecureHttp":  settings.AllowInsecureHTTP,
+		"openRegistration":   settings.OpenRegistration,
+		"twoFactorEnabled":   settings.TwoFactorEnabled,
+		"turnstileEnabled":   settings.TurnstileEnabled,
+		"turnstileSiteKey":   settings.TurnstileSiteKey,
+		"turnstileSecretKey": "",
+		"catchAllEnabled":    true,
+		"mailAutoRefresh":    settings.MailAutoRefresh,
+		"mailRefreshSeconds": settings.MailRefreshSeconds,
+	}
+	if code := admin.do("POST", "/api/admin/settings", update, &settings); code != http.StatusOK || !settings.CatchAllEnabled {
+		t.Fatalf("enable catch-all code=%d settings=%+v", code, settings)
+	}
+
+	payload = map[string]any{
+		"to":      []string{"ghost@lanqin.local"},
+		"subject": "stored for admin only",
+		"text":    "unregistered mailbox content",
+	}
+	if code := admin.do("POST", "/api/mail/send", payload, &sent); code != http.StatusCreated {
+		t.Fatalf("send enabled catch-all code=%d", code)
+	}
+	if code := admin.do("GET", "/api/admin/messages?mailboxId=unregistered&q=stored%20for%20admin", nil, &list); code != http.StatusOK || len(list.Items) != 1 {
+		t.Fatalf("enabled catch-all admin list code=%d items=%+v", code, list.Items)
+	}
+	if got := list.Items[0].RecipientAddr; got != "ghost@lanqin.local" {
+		t.Fatalf("recipientAddress=%q", got)
+	}
+}
+
+func TestAdminSMTPTestEndpoint(t *testing.T) {
+	a := newTestApp(t)
+	host, port, received := startFakeSMTP(t)
+	a.cfg.SMTPHost = host
+	a.cfg.SMTPPort = port
+	ts := httptest.NewServer(a.Router())
+	defer ts.Close()
+	admin := &testClient{t: t, server: ts}
+
+	var login map[string]any
+	if code := admin.do("POST", "/api/auth/login", map[string]string{"email": "admin@lanqin.local", "password": "ChangeMe123!"}, &login); code != http.StatusOK {
+		t.Fatalf("login code=%d body=%v", code, login)
+	}
+
+	var out map[string]any
+	var templates struct {
+		Items []MailTemplate `json:"items"`
+	}
+	if code := admin.do("GET", "/api/admin/mail-templates", nil, &templates); code != http.StatusOK || len(templates.Items) == 0 {
+		t.Fatalf("templates code=%d items=%d", code, len(templates.Items))
+	}
+	var updated MailTemplate
+	if code := admin.do("POST", "/api/admin/mail-templates/smtp_test", map[string]string{
+		"subject":  "自定义 SMTP 测试",
+		"bodyText": "hello {{to}} from {{from}}",
+		"bodyHtml": "<p>hello {{to}} from {{from}}</p>",
+	}, &updated); code != http.StatusOK || updated.Subject != "自定义 SMTP 测试" {
+		t.Fatalf("update template code=%d template=%+v", code, updated)
+	}
+	if code := admin.do("POST", "/api/admin/settings/test-smtp", map[string]string{"to": "test@example.com"}, &out); code != http.StatusOK {
+		t.Fatalf("smtp test code=%d body=%v", code, out)
+	}
+	select {
+	case body := <-received:
+		if !strings.Contains(body, "From: admin@lanqin.local") || !strings.Contains(body, "To: test@example.com") || !strings.Contains(body, "=?utf-8?q?=E8=87=AA=E5=AE=9A=E4=B9=89_SMTP_=E6=B5=8B=E8=AF=95?=") {
+			t.Fatalf("unexpected smtp body: %s", body)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("smtp test message not received")
+	}
+}
+
 func TestProfileAndPasswordUpdate(t *testing.T) {
 	a := newTestApp(t)
 	ts := httptest.NewServer(a.Router())
@@ -259,6 +440,64 @@ func TestProfileAndPasswordUpdate(t *testing.T) {
 	}
 	if code := fresh.do("POST", "/api/auth/login", map[string]string{"email": "admin@lanqin.local", "password": "NewPassword123!"}, &login); code != http.StatusOK {
 		t.Fatalf("new password login code=%d", code)
+	}
+}
+
+func TestUserTwoFactorSetupAndLogin(t *testing.T) {
+	a := newTestApp(t)
+	a.cfg.TwoFactorEnabled = true
+	ts := httptest.NewServer(a.Router())
+	defer ts.Close()
+	client := &testClient{t: t, server: ts}
+
+	var login map[string]any
+	if code := client.do("POST", "/api/auth/login", map[string]string{"email": "admin@lanqin.local", "password": "ChangeMe123!"}, &login); code != http.StatusOK {
+		t.Fatalf("login code=%d body=%v", code, login)
+	}
+
+	var setup struct {
+		Secret     string `json:"secret"`
+		OtpauthURL string `json:"otpauthUrl"`
+	}
+	if code := client.do("POST", "/api/me/2fa/setup", map[string]string{}, &setup); code != http.StatusOK || setup.Secret == "" || !strings.HasPrefix(setup.OtpauthURL, "otpauth://totp/") {
+		t.Fatalf("setup code=%d setup=%+v", code, setup)
+	}
+
+	var out map[string]any
+	if code := client.do("POST", "/api/me/2fa/enable", map[string]string{"code": "000000"}, &out); code != http.StatusUnauthorized {
+		t.Fatalf("wrong enable code=%d body=%v", code, out)
+	}
+	code, err := generateTOTP(setup.Secret, a.now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var enabled struct {
+		User User `json:"user"`
+	}
+	if status := client.do("POST", "/api/me/2fa/enable", map[string]string{"code": code}, &enabled); status != http.StatusOK || !enabled.User.TwoFactorEnabled {
+		t.Fatalf("enable status=%d user=%+v", status, enabled.User)
+	}
+
+	fresh := &testClient{t: t, server: ts}
+	var challenge struct {
+		TwoFactorRequired bool   `json:"twoFactorRequired"`
+		ChallengeToken    string `json:"challengeToken"`
+	}
+	if status := fresh.do("POST", "/api/auth/login", map[string]string{"email": "admin@lanqin.local", "password": "ChangeMe123!"}, &challenge); status != http.StatusOK || !challenge.TwoFactorRequired || challenge.ChallengeToken == "" || fresh.cookie != nil {
+		t.Fatalf("challenge status=%d challenge=%+v cookie=%v", status, challenge, fresh.cookie)
+	}
+	if status := fresh.do("POST", "/api/auth/login", map[string]string{"challengeToken": challenge.ChallengeToken, "twoFactorCode": "000000"}, &out); status != http.StatusUnauthorized {
+		t.Fatalf("wrong challenge status=%d body=%v", status, out)
+	}
+	code, err = generateTOTP(setup.Secret, a.now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := fresh.do("POST", "/api/auth/login", map[string]string{"challengeToken": challenge.ChallengeToken, "twoFactorCode": code}, &login); status != http.StatusOK || fresh.cookie == nil {
+		t.Fatalf("2fa login status=%d body=%v cookie=%v", status, login, fresh.cookie)
+	}
+	if status := fresh.do("POST", "/api/me/2fa/disable", map[string]string{"code": code}, &enabled); status != http.StatusOK || enabled.User.TwoFactorEnabled {
+		t.Fatalf("disable status=%d user=%+v", status, enabled.User)
 	}
 }
 

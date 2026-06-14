@@ -8,6 +8,7 @@ import { LoginPage } from "@/pages/login"
 import { MailPage } from "@/pages/mail"
 import { AdminPage } from "@/pages/admin"
 import { ProfilePage } from "@/pages/profile"
+import { useMe } from "@/hooks/use-me"
 import "./index.css"
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { refetchOnWindowFocus: false, staleTime: 10_000 } } })
@@ -17,9 +18,17 @@ const router = createBrowserRouter([
     { index: true, element: <Navigate to="/mail" replace /> },
     { path: "mail", element: <MailPage /> },
     { path: "profile", element: <ProfilePage /> },
-    { path: "admin", element: <AdminPage /> },
+    { path: "admin", element: <AdminOnly><AdminPage /></AdminOnly> },
   ] },
 ])
+
+function AdminOnly({ children }: { children: React.ReactNode }) {
+  const me = useMe()
+  if (me.isLoading) return null
+  if (!me.data?.user) return <Navigate to="/login" replace />
+  if (me.data.user.role !== "admin") return <Navigate to="/mail" replace />
+  return <>{children}</>
+}
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

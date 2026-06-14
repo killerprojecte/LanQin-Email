@@ -122,20 +122,24 @@ func writeBase64(w io.Writer, data []byte) {
 }
 
 func (a *App) sendSMTP(from string, recipients []string, mimeBytes []byte) error {
-	addr := net.JoinHostPort(a.cfg.SMTPHost, a.cfg.SMTPPort)
+	return sendSMTPWithConfig(a.cfg, from, recipients, mimeBytes)
+}
+
+func sendSMTPWithConfig(cfg Config, from string, recipients []string, mimeBytes []byte) error {
+	addr := net.JoinHostPort(cfg.SMTPHost, cfg.SMTPPort)
 	var auth smtp.Auth
-	if a.cfg.SMTPUsername != "" {
-		auth = smtp.PlainAuth("", a.cfg.SMTPUsername, a.cfg.SMTPPassword, a.cfg.SMTPHost)
+	if cfg.SMTPUsername != "" {
+		auth = smtp.PlainAuth("", cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPHost)
 	}
-	if !a.cfg.SMTPRequireTLS {
+	if !cfg.SMTPRequireTLS {
 		return smtp.SendMail(addr, auth, from, recipients, mimeBytes)
 	}
-	conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: a.cfg.SMTPHost, MinVersion: tls.VersionTLS12})
+	conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: cfg.SMTPHost, MinVersion: tls.VersionTLS12})
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	client, err := smtp.NewClient(conn, a.cfg.SMTPHost)
+	client, err := smtp.NewClient(conn, cfg.SMTPHost)
 	if err != nil {
 		return err
 	}

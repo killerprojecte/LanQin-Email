@@ -73,6 +73,7 @@ export function MailPage() {
   const themeMountedRef = React.useRef(false)
 
   const mailboxList = useQuery({ queryKey: ["mailboxes", "mine"], queryFn: api.myMailboxes })
+  const publicSettings = useQuery({ queryKey: ["public-settings"], queryFn: api.publicSettings })
   const selectedMailbox = React.useMemo(() => mailboxList.data?.items.find((item) => item.id === selectedMailboxId), [mailboxList.data?.items, selectedMailboxId])
   const folders = useQuery({ queryKey: ["folders", selectedMailboxId], queryFn: () => api.folders(selectedMailboxId), enabled: !!selectedMailboxId })
   const messages = useQuery({ queryKey: ["messages", selectedMailboxId, folder, query], queryFn: () => api.messages(folder, query, "", selectedMailboxId), enabled: !!selectedMailboxId })
@@ -124,6 +125,16 @@ export function MailPage() {
     events.addEventListener("sync", () => qc.invalidateQueries({ queryKey: ["folders"] }))
     return () => events.close()
   }, [qc])
+
+  React.useEffect(() => {
+    if (!publicSettings.data?.mailAutoRefresh) return
+    const interval = Math.max(publicSettings.data.mailRefreshMs || 30000, 5000)
+    const timer = window.setInterval(() => {
+      qc.invalidateQueries({ queryKey: ["messages"] })
+      qc.invalidateQueries({ queryKey: ["folders"] })
+    }, interval)
+    return () => window.clearInterval(timer)
+  }, [publicSettings.data?.mailAutoRefresh, publicSettings.data?.mailRefreshMs, qc])
 
   const selected = detail.data
   const allMessages = messages.data?.items || []

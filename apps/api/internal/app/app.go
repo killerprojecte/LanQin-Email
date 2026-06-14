@@ -55,6 +55,14 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := a.ensureDefaultMailTemplates(context.Background()); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := a.loadPersistedSystemSettings(context.Background()); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := a.seed(context.Background()); err != nil {
 		db.Close()
 		return nil, err
@@ -99,6 +107,8 @@ func (a *App) migrate(ctx context.Context) error {
 			display_name TEXT NOT NULL,
 			role TEXT NOT NULL CHECK(role IN ('admin','user')),
 			password_hash TEXT NOT NULL,
+			two_factor_secret TEXT NOT NULL DEFAULT '',
+			two_factor_enabled INTEGER NOT NULL DEFAULT 0,
 			disabled INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
@@ -109,6 +119,26 @@ func (a *App) migrate(ctx context.Context) error {
 			token_hash TEXT NOT NULL UNIQUE,
 			expires_at TEXT NOT NULL,
 			created_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS login_challenges (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			token_hash TEXT NOT NULL UNIQUE,
+			expires_at TEXT NOT NULL,
+			created_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS system_settings (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS mail_templates (
+			key TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			subject TEXT NOT NULL,
+			body_text TEXT NOT NULL,
+			body_html TEXT NOT NULL,
+			updated_at TEXT NOT NULL
 		)`,
 		`CREATE TABLE IF NOT EXISTS domains (
 			id TEXT PRIMARY KEY,
@@ -155,8 +185,9 @@ func (a *App) migrate(ctx context.Context) error {
 		)`,
 		`CREATE TABLE IF NOT EXISTS messages (
 			id TEXT PRIMARY KEY,
-			mailbox_id TEXT NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
-			folder_id TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+			mailbox_id TEXT REFERENCES mailboxes(id) ON DELETE CASCADE,
+			folder_id TEXT REFERENCES folders(id) ON DELETE CASCADE,
+			recipient_addr TEXT NOT NULL DEFAULT '',
 			message_uid TEXT NOT NULL,
 			message_id TEXT NOT NULL,
 			subject TEXT NOT NULL,
@@ -179,7 +210,8 @@ func (a *App) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_mailbox_folder_received ON messages(mailbox_id, folder_id, received_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_search ON messages(mailbox_id, subject, from_addr, snippet)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_mailbox_raw_path ON messages(mailbox_id, raw_path) WHERE raw_path <> ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_mailbox_raw_path ON messages(mailbox_id, raw_path) WHERE raw_path <> '' AND mailbox_id IS NOT NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_unregistered_raw_path ON messages(raw_path) WHERE raw_path <> '' AND mailbox_id IS NULL`,
 		`CREATE TABLE IF NOT EXISTS attachments (
 			id TEXT PRIMARY KEY,
 			message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -230,7 +262,158 @@ func (a *App) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := a.migrateMessagesForUnregistered(ctx); err != nil {
+		return err
+	}
+	if err := a.migrateUsersForTwoFactor(ctx); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (a *App) migrateUsersForTwoFactor(ctx context.Context) error {
+	rows, err := a.db.QueryContext(ctx, `PRAGMA table_info(users)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull int
+		var dflt any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !columns["two_factor_secret"] {
+		if _, err := a.db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN two_factor_secret TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if !columns["two_factor_enabled"] {
+		if _, err := a.db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN two_factor_enabled INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *App) migrateMessagesForUnregistered(ctx context.Context) error {
+	rows, err := a.db.QueryContext(ctx, `PRAGMA table_info(messages)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasRecipientAddr := false
+	mailboxNullable := false
+	folderNullable := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull int
+		var dflt any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		switch name {
+		case "recipient_addr":
+			hasRecipientAddr = true
+		case "mailbox_id":
+			mailboxNullable = notnull == 0
+		case "folder_id":
+			folderNullable = notnull == 0
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasRecipientAddr && mailboxNullable && folderNullable {
+		return nil
+	}
+
+	if _, err := a.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer a.db.ExecContext(context.Background(), `PRAGMA foreign_keys = ON`)
+
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, stmt := range []string{
+		`DROP INDEX IF EXISTS idx_messages_mailbox_folder_received`,
+		`DROP INDEX IF EXISTS idx_messages_search`,
+		`DROP INDEX IF EXISTS idx_messages_mailbox_raw_path`,
+		`DROP INDEX IF EXISTS idx_messages_unregistered_raw_path`,
+	} {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE messages_new (
+		id TEXT PRIMARY KEY,
+		mailbox_id TEXT REFERENCES mailboxes(id) ON DELETE CASCADE,
+		folder_id TEXT REFERENCES folders(id) ON DELETE CASCADE,
+		recipient_addr TEXT NOT NULL DEFAULT '',
+		message_uid TEXT NOT NULL,
+		message_id TEXT NOT NULL,
+		subject TEXT NOT NULL,
+		from_addr TEXT NOT NULL,
+		to_addrs TEXT NOT NULL,
+		cc_addrs TEXT NOT NULL DEFAULT '[]',
+		bcc_addrs TEXT NOT NULL DEFAULT '[]',
+		sent_at TEXT NOT NULL,
+		received_at TEXT NOT NULL,
+		snippet TEXT NOT NULL,
+		body_text TEXT NOT NULL,
+		body_html TEXT NOT NULL,
+		is_read INTEGER NOT NULL DEFAULT 0,
+		is_starred INTEGER NOT NULL DEFAULT 0,
+		has_attachments INTEGER NOT NULL DEFAULT 0,
+		size_bytes INTEGER NOT NULL DEFAULT 0,
+		raw_path TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	)`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO messages_new(id,mailbox_id,folder_id,recipient_addr,message_uid,message_id,subject,from_addr,to_addrs,cc_addrs,bcc_addrs,sent_at,received_at,snippet,body_text,body_html,is_read,is_starred,has_attachments,size_bytes,raw_path,created_at,updated_at)
+		SELECT id,mailbox_id,folder_id,'',message_uid,message_id,subject,from_addr,to_addrs,cc_addrs,bcc_addrs,sent_at,received_at,snippet,body_text,body_html,is_read,is_starred,has_attachments,size_bytes,raw_path,created_at,updated_at FROM messages`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE messages`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE messages_new RENAME TO messages`); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	for _, stmt := range messageIndexes() {
+		if _, err := a.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func messageIndexes() []string {
+	return []string{
+		`CREATE INDEX IF NOT EXISTS idx_messages_mailbox_folder_received ON messages(mailbox_id, folder_id, received_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_messages_search ON messages(mailbox_id, subject, from_addr, snippet)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_mailbox_raw_path ON messages(mailbox_id, raw_path) WHERE raw_path <> '' AND mailbox_id IS NOT NULL`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_unregistered_raw_path ON messages(raw_path) WHERE raw_path <> '' AND mailbox_id IS NULL`,
+	}
 }
 
 func (a *App) seed(ctx context.Context) error {
@@ -378,19 +561,32 @@ func (a *App) seedWelcomeMessage(ctx context.Context, mailboxID string) error {
 		return err
 	}
 	now := a.now().UTC()
+	subject := "欢迎使用 LanQin Email"
+	bodyText := "你的自建邮箱 Webmail 已经初始化完成。请尽快修改默认管理员密码，并配置 MX/SPF/DKIM/DMARC。"
+	bodyHTML := "<p>你的自建邮箱 Webmail 已经初始化完成。</p><p>请尽快修改默认管理员密码，并配置 MX/SPF/DKIM/DMARC。</p>"
+	if tpl, err := a.mailTemplate(ctx, "welcome"); err == nil {
+		rendered := renderMailTemplate(tpl, templateRenderData{
+			To:             a.cfg.AdminEmail,
+			From:           "system@lanqin.local",
+			PublicHostname: a.cfg.PublicHostname,
+			PublicBaseURL:  a.cfg.PublicBaseURL,
+			Time:           now,
+		})
+		subject, bodyText, bodyHTML = rendered.Subject, rendered.Text, rendered.HTML
+	}
 	msg := storedMessage{
 		MailboxID:  mailboxID,
 		FolderID:   folderID,
 		MessageUID: newID("uid"),
 		MessageID:  fmt.Sprintf("<%s@lanqin.local>", newID("msg")),
-		Subject:    "欢迎使用 LanQin Email",
+		Subject:    subject,
 		From:       "system@lanqin.local",
 		To:         []string{a.cfg.AdminEmail},
 		SentAt:     now,
 		ReceivedAt: now,
-		Snippet:    "你的自建邮箱 Webmail 已经初始化完成。",
-		BodyText:   "你的自建邮箱 Webmail 已经初始化完成。请尽快修改默认管理员密码，并配置 MX/SPF/DKIM/DMARC。",
-		BodyHTML:   "<p>你的自建邮箱 Webmail 已经初始化完成。</p><p>请尽快修改默认管理员密码，并配置 MX/SPF/DKIM/DMARC。</p>",
+		Snippet:    snippetFrom(bodyText, bodyHTML),
+		BodyText:   bodyText,
+		BodyHTML:   bodyHTML,
 		IsRead:     false,
 	}
 	_, err = a.insertMessage(ctx, msg, nil)

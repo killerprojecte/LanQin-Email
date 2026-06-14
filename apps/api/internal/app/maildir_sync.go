@@ -20,10 +20,12 @@ import (
 )
 
 type maildirMailbox struct {
-	ID        string
-	Address   string
-	LocalPart string
-	Domain    string
+	ID              string
+	Address         string
+	LocalPart       string
+	Domain          string
+	Unregistered    bool
+	RecipientDomain string
 }
 
 type maildirFolder struct {
@@ -80,6 +82,14 @@ func (a *App) syncMaildirOnce(ctx context.Context) (int, error) {
 	}
 	imported := 0
 	for _, mb := range mailboxes {
+		if mb.Unregistered {
+			count, err := a.syncUnregisteredMaildir(ctx, mb)
+			if err != nil {
+				return imported, err
+			}
+			imported += count
+			continue
+		}
 		folders, err := a.maildirFolders(ctx, mb.ID)
 		if err != nil {
 			return imported, err
@@ -135,7 +145,109 @@ func (a *App) maildirMailboxes(ctx context.Context) ([]maildirMailbox, error) {
 		}
 		out = append(out, mb)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if a.cfg.CatchAllEnabled {
+		domainRows, err := a.db.QueryContext(ctx, `SELECT name FROM domains WHERE status='active' ORDER BY name`)
+		if err != nil {
+			return nil, err
+		}
+		defer domainRows.Close()
+		for domainRows.Next() {
+			var domain string
+			if err := domainRows.Scan(&domain); err != nil {
+				return nil, err
+			}
+			out = append(out, maildirMailbox{
+				Address:         "__unregistered__@" + domain,
+				LocalPart:       "__unregistered__",
+				Domain:          domain,
+				Unregistered:    true,
+				RecipientDomain: domain,
+			})
+		}
+		if err := domainRows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (a *App) syncUnregisteredMaildir(ctx context.Context, mb maildirMailbox) (int, error) {
+	base := filepath.Join(strings.TrimSpace(a.cfg.MaildirRoot), mb.Domain, mb.LocalPart, "Maildir")
+	imported := 0
+	for _, sub := range []string{"new", "cur"} {
+		select {
+		case <-ctx.Done():
+			return imported, ctx.Err()
+		default:
+		}
+		dir := filepath.Join(base, sub)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return imported, err
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
+			path := filepath.Join(dir, entry.Name())
+			ok, err := a.syncUnregisteredMaildirFile(ctx, mb, path)
+			if err != nil {
+				a.log.Warn("unregistered maildir file import failed", "path", path, "error", err)
+				continue
+			}
+			if ok {
+				imported++
+			}
+		}
+	}
+	return imported, nil
+}
+
+func (a *App) syncUnregisteredMaildirFile(ctx context.Context, mb maildirMailbox, path string) (bool, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	msg, attachments, err := a.parseMaildirMessage(raw, mb.Address)
+	if err != nil {
+		return false, err
+	}
+	recipient := unregisteredRecipientFromMessage(msg, mb.RecipientDomain)
+	if recipient == "" {
+		recipient = mb.Address
+	}
+	msg.MailboxID = ""
+	msg.FolderID = ""
+	msg.RecipientAddr = recipient
+	msg.RawPath = path
+	if msg.MessageUID == "" {
+		msg.MessageUID = newID("uid")
+	}
+	if msg.MessageID == "" {
+		msg.MessageID = fmt.Sprintf("<%s@lanqin.local>", newID("msg"))
+	}
+	if msg.ReceivedAt.IsZero() {
+		msg.ReceivedAt = a.now().UTC()
+	}
+	if msg.SentAt.IsZero() {
+		msg.SentAt = msg.ReceivedAt
+	}
+	if msg.Snippet == "" {
+		msg.Snippet = snippetFrom(msg.BodyText, msg.BodyHTML)
+	}
+	if exists, err := a.unregisteredMaildirMessageExists(ctx, path, msg.MessageID, msg.RecipientAddr); err != nil {
+		return false, err
+	} else if exists {
+		return false, nil
+	}
+	_, err = a.insertMessage(ctx, msg, attachments)
+	return err == nil, err
 }
 
 func (a *App) maildirFolders(ctx context.Context, mailboxID string) ([]maildirFolder, error) {
@@ -210,6 +322,26 @@ func (a *App) maildirMessageExists(ctx context.Context, mailboxID, folderID, raw
 		return false, err
 	}
 	return count > 0, nil
+}
+
+func (a *App) unregisteredMaildirMessageExists(ctx context.Context, rawPath, messageID, recipient string) (bool, error) {
+	var count int
+	err := a.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM messages WHERE mailbox_id IS NULL AND (raw_path=? OR (recipient_addr=? AND message_id=? AND message_id <> ''))`, rawPath, recipient, messageID).Scan(&count)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func unregisteredRecipientFromMessage(msg storedMessage, domain string) string {
+	domain = normalizeDomain(domain)
+	for _, address := range append(append([]string{}, msg.To...), msg.CC...) {
+		address = normalizeEmail(address)
+		if strings.HasSuffix(address, "@"+domain) {
+			return address
+		}
+	}
+	return ""
 }
 
 func (a *App) parseMaildirMessage(raw []byte, fallbackTo string) (storedMessage, []AttachmentInput, error) {

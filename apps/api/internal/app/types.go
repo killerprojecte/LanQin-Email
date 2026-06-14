@@ -3,12 +3,19 @@ package app
 import "time"
 
 type User struct {
-	ID          string    `json:"id"`
-	Email       string    `json:"email"`
-	DisplayName string    `json:"displayName"`
-	Role        string    `json:"role"`
-	Disabled    bool      `json:"disabled"`
-	CreatedAt   time.Time `json:"createdAt"`
+	ID               string    `json:"id"`
+	Email            string    `json:"email"`
+	DisplayName      string    `json:"displayName"`
+	Role             string    `json:"role"`
+	Disabled         bool      `json:"disabled"`
+	TwoFactorEnabled bool      `json:"twoFactorEnabled"`
+	CreatedAt        time.Time `json:"createdAt"`
+}
+
+type AdminUser struct {
+	User
+	MailboxCount int      `json:"mailboxCount"`
+	Mailboxes    []string `json:"mailboxes"`
 }
 
 type Domain struct {
@@ -55,6 +62,9 @@ type MailFolder struct {
 type MailMessage struct {
 	ID             string       `json:"id"`
 	MailboxID      string       `json:"mailboxId,omitempty"`
+	MailboxAddress string       `json:"mailboxAddress,omitempty"`
+	OwnerEmail     string       `json:"ownerEmail,omitempty"`
+	RecipientAddr  string       `json:"recipientAddress,omitempty"`
 	FolderID       string       `json:"folderId"`
 	Folder         string       `json:"folder"`
 	MessageUID     string       `json:"messageUid"`

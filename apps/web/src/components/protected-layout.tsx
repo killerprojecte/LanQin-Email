@@ -1,6 +1,6 @@
 import * as React from "react"
 import { Navigate, Outlet, Link, useLocation, useNavigate } from "react-router-dom"
-import { Inbox, LogOut, Mail, Settings } from "lucide-react"
+import { BarChart3, Copy, Globe2, Inbox, LogOut, Mail, Mailbox, Settings, Users } from "lucide-react"
 import { useQueryClient } from "@tanstack/react-query"
 import { api } from "@/lib/api"
 import { useMe } from "@/hooks/use-me"
@@ -23,6 +23,16 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar"
 
+const adminSections = [
+  { key: "overview", label: "概览", icon: <BarChart3 /> },
+  { key: "users", label: "用户", icon: <Users /> },
+  { key: "domains", label: "域名", icon: <Globe2 /> },
+  { key: "mailboxes", label: "邮箱账号", icon: <Mailbox /> },
+  { key: "aliases", label: "别名转发", icon: <Copy /> },
+  { key: "messages", label: "全部邮件", icon: <Inbox /> },
+  { key: "settings", label: "系统设置", icon: <Settings /> },
+]
+
 export function ProtectedLayout() {
   const me = useMe()
   const location = useLocation()
@@ -35,6 +45,8 @@ export function ProtectedLayout() {
   const user = me.data.user
   const isMailRoute = location.pathname.startsWith("/mail")
   const isProfileRoute = location.pathname.startsWith("/profile")
+  const isAdminRoute = location.pathname.startsWith("/admin")
+  const adminSection = new URLSearchParams(location.search).get("section") || "overview"
 
   async function logout() {
     await api.logout().catch(() => undefined)
@@ -66,14 +78,24 @@ export function ProtectedLayout() {
           </SidebarMenu>
         </SidebarHeader>
         <SidebarContent>
-          <SidebarGroup>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                <NavItem to="/mail" icon={<Inbox />} label="Webmail" />
-                {user.role === "admin" && <NavItem to="/admin" icon={<Settings />} label="系统管理" />}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
+          {user.role === "admin" && isAdminRoute && (
+            <SidebarGroup>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {adminSections.map((item) => (
+                    <SidebarMenuItem key={item.key}>
+                      <SidebarMenuButton asChild isActive={adminSection === item.key} tooltip={item.label}>
+                        <Link to={`/admin?section=${item.key}`}>
+                          {item.icon}
+                          <span>{item.label}</span>
+                        </Link>
+                      </SidebarMenuButton>
+                    </SidebarMenuItem>
+                  ))}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          )}
         </SidebarContent>
         <SidebarFooter>
           <SidebarMenu>
@@ -113,20 +135,5 @@ export function ProtectedLayout() {
         </div>
       </SidebarInset>
     </SidebarProvider>
-  )
-}
-
-function NavItem({ to, icon, label }: { to: string; icon: React.ReactNode; label: string }) {
-  const location = useLocation()
-  const active = location.pathname.startsWith(to)
-  return (
-    <SidebarMenuItem>
-      <SidebarMenuButton asChild isActive={active} tooltip={label}>
-        <Link to={to}>
-          {icon}
-          <span>{label}</span>
-        </Link>
-      </SidebarMenuButton>
-    </SidebarMenuItem>
   )
 }
