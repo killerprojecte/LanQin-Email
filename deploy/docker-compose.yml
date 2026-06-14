@@ -1,69 +1,20 @@
 version: "3.9"
 
 services:
-  api:
+  lanqin-email:
     build:
       context: ..
-      dockerfile: deploy/api.Dockerfile
+      dockerfile: deploy/all-in-one/Dockerfile
     env_file: .env
-    volumes:
-      - lanqin-data:/data
-      - maildata:/var/mail/vhosts:ro
-    depends_on:
-      - dovecot
-      - postfix
-    restart: unless-stopped
-
-  web:
-    build:
-      context: ..
-      dockerfile: deploy/web.Dockerfile
-    restart: unless-stopped
-
-  nginx:
-    image: nginx:1.27-alpine
-    volumes:
-      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       - "80:80"
       - "443:443"
-    depends_on:
-      - api
-      - web
-    restart: unless-stopped
-
-  postfix:
-    build:
-      context: ./postfix
-    env_file: .env
-    volumes:
-      - lanqin-data:/data
-      - maildata:/var/mail/vhosts
-    ports:
       - "25:25"
       - "587:587"
-    depends_on:
-      - dovecot
-      - opendkim
-    restart: unless-stopped
-
-  dovecot:
-    build:
-      context: ./dovecot
-    env_file: .env
+      - "993:993"
     volumes:
       - lanqin-data:/data
       - maildata:/var/mail/vhosts
-    ports:
-      - "993:993"
-    restart: unless-stopped
-
-  opendkim:
-    build:
-      context: ./opendkim
-    env_file: .env
-    volumes:
-      - lanqin-data:/data:ro
       - dkim-keys:/etc/opendkim/keys
     restart: unless-stopped
 

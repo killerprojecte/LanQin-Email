@@ -1,6 +1,6 @@
 # LanQin Email Docker 部署说明
 
-## 启动
+## 默认：单容器部署
 
 ```bash
 cd deploy
@@ -9,9 +9,39 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+默认只启动一个业务容器：
+
+```text
+lanqin-email
+```
+
+容器内部包含：
+
+- Go API
+- Web 静态站点
+- Nginx
+- Postfix
+- Dovecot
+- OpenDKIM
+
+常用日志：
+
+```bash
+docker compose logs -f lanqin-email
+```
+
+## 可选：多容器调试部署
+
+如果需要分别查看 Postfix / Dovecot / OpenDKIM 日志，可以使用保留的 stack 编排：
+
+```bash
+cd deploy
+docker compose -f docker-compose.stack.yml up -d --build
+```
+
 ## DNS
 
-进入 Web 管理后台后，在“DNS 记录”面板查看每个域名需要配置的：
+进入 Web 管理后台后，在域名管理中查看每个域名需要配置的：
 
 - MX
 - SPF TXT
@@ -30,6 +60,6 @@ docker compose up -d --build
 
 ## 生产注意
 
-- 替换 Dovecot 示例自签证书，建议在 Nginx 或边缘负载均衡终止 HTTPS。
+- 建议在服务器或边缘网关配置 HTTPS。
 - 云厂商通常默认封禁 25 端口，需要单独申请解封。
-- SQLite 适合 V1 单机部署；多节点部署前迁移到 PostgreSQL，并把 Postfix/Dovecot maps 改为 PostgreSQL。 
+- SQLite 适合 V1 单机部署；多节点部署前迁移到 PostgreSQL，并把 Postfix/Dovecot maps 改为 PostgreSQL。

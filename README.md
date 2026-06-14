@@ -1,6 +1,6 @@
 # LanQin Email
 
-LanQin Email 是一个自建邮箱 Webmail MVP：React/Vite + shadcn 风格组件前端，Go + SQLite 后端，部署层预留 Postfix/Dovecot/OpenDKIM 集成。
+LanQin Email 是一个自建邮箱 Webmail MVP：React/Vite + shadcn 风格组件前端，Go + SQLite 后端，默认使用单容器集成 Postfix、Dovecot、OpenDKIM。
 
 ## 快速开发
 
@@ -44,7 +44,24 @@ npm run check:shadcn
 
 ## Docker 部署
 
-`deploy/docker-compose.yml` 提供 Linux 单机部署骨架：API、Web、Postfix、Dovecot、OpenDKIM、Nginx。真实公网收发前需要正确配置 MX/SPF/DKIM/DMARC，并确认云厂商开放 25/587/993 端口。
+默认单容器部署：
+
+```bash
+cd deploy
+cp .env.example .env
+docker compose up -d --build
+```
+
+这个容器内部集成：API、Web、Nginx、Postfix、Dovecot、OpenDKIM。
+
+如需多容器调试版：
+
+```bash
+cd deploy
+docker compose -f docker-compose.stack.yml up -d --build
+```
+
+真实公网收发前需要正确配置 MX/SPF/DKIM/DMARC，并确认云厂商开放 25/587/993 端口。
 
 ## V1 能力
 
@@ -57,6 +74,6 @@ npm run check:shadcn
 ## 当前收发说明
 
 - 本地开发：系统内邮箱互发可直接使用；未配置 `LANQIN_SMTP_HOST` 时，外部收件人不会真正投递到公网。
-- 服务器部署：`deploy/.env.example` 默认使用 `LANQIN_SMTP_HOST=postfix`，发件会交给 Postfix。
+- 服务器部署：`deploy/.env.example` 默认使用 `LANQIN_SMTP_HOST=127.0.0.1`，发件会交给同容器内 Postfix。
 - 收件同步：Postfix/Dovecot 收到的 Maildir 邮件会由 API 的 Maildir worker 同步到 SQLite 后展示在 Webmail。
 - Maildir worker 通过 `LANQIN_MAILDIR_ROOT` 和 `LANQIN_MAILDIR_SCAN_SECONDS` 控制，默认服务器路径为 `/var/mail/vhosts`。
