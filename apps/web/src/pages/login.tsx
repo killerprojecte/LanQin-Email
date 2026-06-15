@@ -62,7 +62,7 @@ export function LoginPage() {
             {login.isPending ? "登录中..." : challengeToken ? "验证登录" : "登录"}
           </Button>
           {challengeToken && <Button type="button" variant="ghost" className="w-full" onClick={() => setChallengeToken("")}>返回登录</Button>}
-          {!challengeToken && publicSettings.data?.openRegistration && (
+          {!challengeToken && (
             <Button type="button" variant="ghost" className="w-full" asChild>
               <Link to="/register">注册账号</Link>
             </Button>
