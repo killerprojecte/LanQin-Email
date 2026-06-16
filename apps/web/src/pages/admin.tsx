@@ -851,9 +851,34 @@ function DNSPanel({ domain, embedded = false }: { domain?: Domain; embedded?: bo
   return <Card><CardHeader>{header}</CardHeader><CardContent>{content}</CardContent></Card>
 }
 
+const dnsDescriptions: Record<string, string> = {
+  MX: "指定收件服务器。把邮件投递到该地址指向的服务器。",
+  TXT: "", // 具体含义根据内容区分
+}
+
+function dnsDescription(record: DNSRecord): string {
+  if (record.type === "TXT" && record.name.startsWith("_dmarc")) return "声明域名的 DMARC 策略（如何处理未通过 SPF/DKIM 验证的邮件）。"
+  if (record.type === "TXT" && record.value.includes("DKIM1")) return "DKIM 公钥。收件服务器用此密钥验证邮件是否由你发出。"
+  if (record.type === "TXT" && record.value.includes("spf1")) return "声明哪些服务器有权使用你的域名发件，防止伪造。"
+  if (record.type === "MX") return `确保 ${record.name} 的 A 记录已指向你的服务器 IP，邮件才能到达。`
+  return ""
+}
+
 function DNSRecordRow({ record }: { record: DNSRecord }) {
   const { toast } = useToast(); const text = `${record.type} ${record.name} ${record.value}`
-  return <div className="rounded-lg border bg-card p-3"><div className="mb-2 flex items-center justify-between"><Badge variant="outline" className="font-mono">{record.type}</Badge><Button size="sm" variant="ghost" className="h-7 gap-1 text-xs" onClick={() => { navigator.clipboard.writeText(text); toast({ title: "已复制" }) }}><Copy className="h-3.5 w-3.5" />复制</Button></div><div className="break-all font-mono text-xs text-muted-foreground"><div><span className="text-foreground">Name:</span> {record.name}</div><div><span className="text-foreground">Value:</span> {record.value}</div><div><span className="text-foreground">TTL:</span> {record.ttl}s</div></div></div>
+  const desc = dnsDescription(record)
+  return <div className="rounded-lg border bg-card p-3">
+    <div className="mb-2 flex items-center justify-between">
+      <Badge variant="outline" className="font-mono">{record.type}</Badge>
+      <Button size="sm" variant="ghost" className="h-7 gap-1 text-xs" onClick={() => { navigator.clipboard.writeText(text); toast({ title: "已复制" }) }}><Copy className="h-3.5 w-3.5" />复制</Button>
+    </div>
+    {desc && <p className="mb-2 text-xs text-muted-foreground">{desc}</p>}
+    <div className="break-all font-mono text-xs text-muted-foreground">
+      <div><span className="text-foreground">Name:</span> {record.name}</div>
+      <div><span className="text-foreground">Value:</span> {record.value}</div>
+      <div><span className="text-foreground">TTL:</span> {record.ttl}s</div>
+    </div>
+  </div>
 }
 
 function fieldValue(form: FormData, name: string, fallback: string) {
