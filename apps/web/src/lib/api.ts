@@ -2,17 +2,19 @@ import type { User, AdminUser, AdminOverview, Domain, Mailbox, Alias, MailFolder
 export * from "./api-types"
 
 const REQUEST_TIMEOUT_MS = 15_000
+const MAIL_DELIVERY_TIMEOUT_MS = 60_000
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, init: RequestInit & { timeoutMs?: number } = {}): Promise<T> {
+  const { timeoutMs, ...requestInit } = init
   const controller = new AbortController()
-  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
-  const externalSignal = init.signal
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs || REQUEST_TIMEOUT_MS)
+  const externalSignal = requestInit.signal
   if (externalSignal) {
     if (externalSignal.aborted) controller.abort()
     else externalSignal.addEventListener("abort", () => controller.abort(), { once: true })
   }
   try {
-    const res = await fetch(path, { credentials: "include", headers: { "Content-Type": "application/json", ...(init.headers || {}) }, ...init, signal: controller.signal })
+    const res = await fetch(path, { credentials: "include", headers: { "Content-Type": "application/json", ...(requestInit.headers || {}) }, ...requestInit, signal: controller.signal })
     if (!res.ok) {
       let message = `${res.status} ${res.statusText}`
       try { const body = await res.json(); message = body.error || message } catch {}
@@ -83,7 +85,7 @@ export const api = {
   adminMessage: (id: string) => request<MailMessage>(`/api/admin/messages/${id}`),
   systemSettings: () => request<SystemSettings>("/api/admin/settings"),
   updateSystemSettings: (payload: SystemSettingsPayload) => request<SystemSettings>("/api/admin/settings", { method: "POST", body: JSON.stringify(payload) }),
-  testSmtp: (to: string) => request<{ ok: boolean }>("/api/admin/settings/test-smtp", { method: "POST", body: JSON.stringify({ to }) }),
+  testSmtp: (to: string) => request<{ ok: boolean }>("/api/admin/settings/test-smtp", { method: "POST", body: JSON.stringify({ to }), timeoutMs: MAIL_DELIVERY_TIMEOUT_MS }),
   mailTemplates: () => request<ListResponse<MailTemplate>>("/api/admin/mail-templates"),
   updateMailTemplate: (key: string, payload: { subject: string; bodyText: string; bodyHtml: string }) => request<MailTemplate>(`/api/admin/mail-templates/${encodeURIComponent(key)}`, { method: "POST", body: JSON.stringify(payload) }),
   resetMailTemplate: (key: string) => request<MailTemplate>(`/api/admin/mail-templates/${encodeURIComponent(key)}/reset`, { method: "POST" }),
@@ -112,7 +114,7 @@ export const api = {
     return request<ListResponse<MailMessage>>(`/api/mail/starred?${params.toString()}`)
   },
   message: (id: string, options: { markRead?: boolean } = {}) => request<MailMessage>(`/api/mail/messages/${id}${options.markRead === false ? "?markRead=0" : ""}`),
-  send: (payload: SendPayload) => request<MailMessage>("/api/mail/send", { method: "POST", body: JSON.stringify(payload) }),
+  send: (payload: SendPayload) => request<MailMessage>("/api/mail/send", { method: "POST", body: JSON.stringify(payload), timeoutMs: MAIL_DELIVERY_TIMEOUT_MS }),
   markRead: (id: string, read: boolean) => request<{ ok: boolean }>(`/api/mail/messages/${id}/mark-read`, { method: "POST", body: JSON.stringify({ read }) }),
   star: (id: string, starred: boolean) => request<{ ok: boolean }>(`/api/mail/messages/${id}/star`, { method: "POST", body: JSON.stringify({ starred }) }),
   addLabel: (id: string, payload: { name: string; color?: string }) => request<{ labels: MailLabel[] }>(`/api/mail/messages/${id}/labels`, { method: "POST", body: JSON.stringify(payload) }),

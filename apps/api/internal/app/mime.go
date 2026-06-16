@@ -16,6 +16,8 @@ import (
 	"time"
 )
 
+const smtpSessionTimeout = 45 * time.Second
+
 type MIMEMessage struct {
 	From        string
 	To          []string
@@ -142,10 +144,11 @@ func sendSMTPWithConfig(cfg Config, from string, recipients []string, mimeBytes 
 }
 
 func sendSMTPPlain(addr, host string, auth smtp.Auth, from string, recipients []string, mimeBytes []byte) error {
-	conn, err := net.Dial("tcp", addr)
+	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
 		return err
 	}
+	_ = conn.SetDeadline(time.Now().Add(smtpSessionTimeout))
 	client, err := smtp.NewClient(conn, host)
 	if err != nil {
 		_ = conn.Close()
@@ -156,10 +159,12 @@ func sendSMTPPlain(addr, host string, auth smtp.Auth, from string, recipients []
 }
 
 func sendSMTPImplicitTLS(addr, host string, auth smtp.Auth, from string, recipients []string, mimeBytes []byte) error {
-	conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
 	if err != nil {
 		return err
 	}
+	_ = conn.SetDeadline(time.Now().Add(smtpSessionTimeout))
 	client, err := smtp.NewClient(conn, host)
 	if err != nil {
 		_ = conn.Close()
@@ -170,10 +175,11 @@ func sendSMTPImplicitTLS(addr, host string, auth smtp.Auth, from string, recipie
 }
 
 func sendSMTPStartTLS(addr, host string, auth smtp.Auth, from string, recipients []string, mimeBytes []byte) error {
-	conn, err := net.Dial("tcp", addr)
+	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
 		return err
 	}
+	_ = conn.SetDeadline(time.Now().Add(smtpSessionTimeout))
 	client, err := smtp.NewClient(conn, host)
 	if err != nil {
 		_ = conn.Close()
