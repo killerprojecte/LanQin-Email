@@ -9,12 +9,7 @@ services:
       - "587:587"
       - "993:993"
     volumes:
-      - lanqin-data:/data
-      - maildata:/var/mail/vhosts
-      - rspamd-dkim:/var/lib/rspamd/dkim
+      - ./data:/data
+      - ./mail:/var/mail/vhosts
+      - ./dkim:/var/lib/rspamd/dkim
     restart: unless-stopped
-
-volumes:
-  lanqin-data:
-  maildata:
-  rspamd-dkim:

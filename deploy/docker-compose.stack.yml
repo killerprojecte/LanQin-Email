@@ -3,8 +3,8 @@ services:
     image: ${LANQIN_API_IMAGE:-ghcr.io/lanqin996/lanqin-email-api:latest}
     env_file: .env
     volumes:
-      - lanqin-data:/data
-      - maildata:/var/mail/vhosts:ro
+      - ./data:/data:ro
+      - ./mail:/var/mail/vhosts:ro
     depends_on:
       - dovecot
       - postfix
@@ -30,8 +30,8 @@ services:
     image: ${LANQIN_POSTFIX_IMAGE:-ghcr.io/lanqin996/lanqin-email-postfix:latest}
     env_file: .env
     volumes:
-      - lanqin-data:/data
-      - maildata:/var/mail/vhosts
+      - ./data:/data
+      - ./mail:/var/mail/vhosts
     ports:
       - "25:25"
       - "587:587"
@@ -44,8 +44,8 @@ services:
     image: ${LANQIN_DOVECOT_IMAGE:-ghcr.io/lanqin996/lanqin-email-dovecot:latest}
     env_file: .env
     volumes:
-      - lanqin-data:/data
-      - maildata:/var/mail/vhosts
+      - ./data:/data
+      - ./mail:/var/mail/vhosts
     ports:
       - "993:993"
     restart: unless-stopped
@@ -54,11 +54,6 @@ services:
     image: ${LANQIN_RSPAMD_IMAGE:-ghcr.io/lanqin996/lanqin-email-rspamd:latest}
     env_file: .env
     volumes:
-      - lanqin-data:/data:ro
-      - rspamd-dkim:/var/lib/rspamd/dkim
+      - ./data:/data:ro
+      - ./dkim:/var/lib/rspamd/dkim
     restart: unless-stopped
-
-volumes:
-  lanqin-data:
-  maildata:
-  rspamd-dkim:
