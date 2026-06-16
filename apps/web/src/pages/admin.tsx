@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
@@ -571,7 +571,6 @@ function SystemSettingsSection({ settings, domains }: { settings?: SystemSetting
           <div className="flex items-center justify-between gap-3">
             <div>
               <CardTitle>发信通道</CardTitle>
-              <CardDescription>单容器默认使用内置 Postfix（127.0.0.1:25），不需要再配置外部 SMTP。只有需要走第三方中继时才修改这里。</CardDescription>
             </div>
             <TestSMTPDialog disabled={!settings} />
           </div>
