@@ -33,10 +33,12 @@ func (a *App) handleDNSCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) dnsRecordsFor(d *Domain) []DNSRecord {
-	host := strings.TrimSuffix(a.cfg.PublicHostname, ".") + "."
 	name := strings.TrimSuffix(d.Name, ".")
+	// MX 建议使用 mail.<域名> 标准格式，而不是直接用 PublicHostname
+	// 避免 PublicHostname 等于域名本身时出现 MX 指向自己的问题
+	mxHost := "mail." + name + "."
 	return []DNSRecord{
-		{Type: "MX", Name: name, Value: fmt.Sprintf("10 %s", host), TTL: 300},
+		{Type: "MX", Name: name, Value: fmt.Sprintf("10 %s", mxHost), TTL: 300},
 		{Type: "TXT", Name: name, Value: "v=spf1 mx -all", TTL: 300},
 		{Type: "TXT", Name: d.DKIMSelector + "._domainkey." + name, Value: "v=DKIM1; k=rsa; p=" + d.DKIMPublicKey, TTL: 300},
 		{Type: "TXT", Name: "_dmarc." + name, Value: "v=DMARC1; p=quarantine; rua=mailto:postmaster@" + name, TTL: 300},

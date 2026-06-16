@@ -838,7 +838,14 @@ function DNSPanel({ domain, embedded = false }: { domain?: Domain; embedded?: bo
   const { toast } = useToast(); const qc = useQueryClient(); const records = useQuery({ queryKey: ["dns-records", domain?.id], queryFn: () => api.dnsRecords(domain!.id), enabled: !!domain })
   const check = useMutation({ mutationFn: () => api.checkDns(domain!.id), onSuccess: (res) => { qc.invalidateQueries({ queryKey: ["admin", "domains"] }); toast({ title: res.status === "ok" ? "DNS 检测通过" : "DNS 检测未通过", description: Object.values(res.checks).map((c) => c.message).join("；") }) } })
   if (!domain) return <Card><CardContent className="p-6 text-muted-foreground">请选择域名</CardContent></Card>
-  const content = <><div className="space-y-3">{records.data?.items.map((r) => <DNSRecordRow key={`${r.type}-${r.name}`} record={r} />)}</div>{check.data && <><Separator className="my-4" /><div className="space-y-2">{Object.entries(check.data.checks).map(([k, v]) => <div key={k} className="flex items-center gap-2 text-sm"><CheckCircle2 className={`h-4 w-4 ${v.ok ? "text-green-600" : "text-destructive"}`} /><span className="font-medium">{k.toUpperCase()}:</span> {v.message}</div>)}</div></>}</>
+  const content = <>
+    <p className="mb-3 text-sm text-muted-foreground">以下为需要在域名 DNS 管理中添加的记录：</p>
+    <div className="space-y-3">{records.data?.items.map((r) => <DNSRecordRow key={`${r.type}-${r.name}`} record={r} />)}</div>
+    {check.data && <>
+      <Separator className="my-4" />
+      <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground"><CheckCircle2 className="h-4 w-4" />检测结果</div>
+      <div className="mt-2 space-y-2">{Object.entries(check.data.checks).map(([k, v]) => <div key={k} className="flex items-center gap-2 text-sm"><CheckCircle2 className={`h-4 w-4 shrink-0 ${v.ok ? "text-green-600" : "text-destructive"}`} /><span className="font-medium">{k.toUpperCase()}:</span> {v.message}</div>)}</div>
+    </>}</>
   const header = <div className="flex items-center justify-between"><CardTitle>DNS 记录</CardTitle><Button variant="outline" size="sm" onClick={() => check.mutate()} disabled={check.isPending}><RefreshCcw className="h-4 w-4" />检测</Button></div>
   if (embedded) return <div className="space-y-4"><div className="flex items-center justify-between"><div className="font-medium">DNS 记录</div><Button variant="outline" size="sm" onClick={() => check.mutate()} disabled={check.isPending}><RefreshCcw className="h-4 w-4" />检测</Button></div>{content}</div>
   return <Card><CardHeader>{header}</CardHeader><CardContent>{content}</CardContent></Card>
@@ -846,7 +853,7 @@ function DNSPanel({ domain, embedded = false }: { domain?: Domain; embedded?: bo
 
 function DNSRecordRow({ record }: { record: DNSRecord }) {
   const { toast } = useToast(); const text = `${record.type} ${record.name} ${record.value}`
-  return <div className="rounded-lg border bg-card p-3"><div className="mb-2 flex items-center justify-between"><Badge variant="outline" className="font-mono">{record.type}</Badge><Button size="sm" variant="ghost" className="h-7 gap-1 text-xs" onClick={() => { navigator.clipboard.writeText(text); toast({ title: "已复制" }) }}><Copy className="h-3.5 w-3.5" />复制</Button></div><div className="break-all font-mono text-xs text-muted-foreground"><div>Name: {record.name}</div><div>Value: {record.value}</div><div>TTL: {record.ttl}s</div></div></div>
+  return <div className="rounded-lg border bg-card p-3"><div className="mb-2 flex items-center justify-between"><Badge variant="outline" className="font-mono">{record.type}</Badge><Button size="sm" variant="ghost" className="h-7 gap-1 text-xs" onClick={() => { navigator.clipboard.writeText(text); toast({ title: "已复制" }) }}><Copy className="h-3.5 w-3.5" />复制</Button></div><div className="break-all font-mono text-xs text-muted-foreground"><div><span className="text-foreground">Name:</span> {record.name}</div><div><span className="text-foreground">Value:</span> {record.value}</div><div><span className="text-foreground">TTL:</span> {record.ttl}s</div></div></div>
 }
 
 function fieldValue(form: FormData, name: string, fallback: string) {
