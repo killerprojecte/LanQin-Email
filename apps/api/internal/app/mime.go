@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -132,18 +133,63 @@ func sendSMTPWithConfig(cfg Config, from string, recipients []string, mimeBytes 
 		auth = smtp.PlainAuth("", cfg.SMTPUsername, cfg.SMTPPassword, cfg.SMTPHost)
 	}
 	if !cfg.SMTPRequireTLS {
-		return smtp.SendMail(addr, auth, from, recipients, mimeBytes)
+		return sendSMTPPlain(addr, cfg.SMTPHost, auth, from, recipients, mimeBytes)
 	}
-	conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: cfg.SMTPHost, MinVersion: tls.VersionTLS12})
+	if cfg.SMTPPort == "465" {
+		return sendSMTPImplicitTLS(addr, cfg.SMTPHost, auth, from, recipients, mimeBytes)
+	}
+	return sendSMTPStartTLS(addr, cfg.SMTPHost, auth, from, recipients, mimeBytes)
+}
+
+func sendSMTPPlain(addr, host string, auth smtp.Auth, from string, recipients []string, mimeBytes []byte) error {
+	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	client, err := smtp.NewClient(conn, cfg.SMTPHost)
+	client, err := smtp.NewClient(conn, host)
 	if err != nil {
+		_ = conn.Close()
 		return err
 	}
 	defer client.Close()
+	return sendSMTPMessage(client, auth, from, recipients, mimeBytes)
+}
+
+func sendSMTPImplicitTLS(addr, host string, auth smtp.Auth, from string, recipients []string, mimeBytes []byte) error {
+	conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		return err
+	}
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		_ = conn.Close()
+		return err
+	}
+	defer client.Close()
+	return sendSMTPMessage(client, auth, from, recipients, mimeBytes)
+}
+
+func sendSMTPStartTLS(addr, host string, auth smtp.Auth, from string, recipients []string, mimeBytes []byte) error {
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return err
+	}
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		_ = conn.Close()
+		return err
+	}
+	defer client.Close()
+	if ok, _ := client.Extension("STARTTLS"); !ok {
+		return errors.New("smtp server does not support STARTTLS")
+	}
+	if err := client.StartTLS(&tls.Config{ServerName: host, MinVersion: tls.VersionTLS12}); err != nil {
+		return err
+	}
+	return sendSMTPMessage(client, auth, from, recipients, mimeBytes)
+}
+
+func sendSMTPMessage(client *smtp.Client, auth smtp.Auth, from string, recipients []string, mimeBytes []byte) error {
 	if auth != nil {
 		if err := client.Auth(auth); err != nil {
 			return err

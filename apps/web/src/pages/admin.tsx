@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
@@ -148,7 +148,7 @@ function setupChecklist(overview: { activeUsers: number; activeMailboxes: number
     { key: "domain", title: "添加邮件域名", detail: hasDomain ? `${domains.length} 个域名已添加` : "先添加 example.com 这样的邮件域名", done: hasDomain, section: "domains" as Section },
     { key: "dns", title: "完成 DNS 检测", detail: dnsReady ? "至少一个域名 DNS 正常" : "配置 MX、SPF、DKIM、DMARC 后执行检测", done: dnsReady, section: "domains" as Section },
     { key: "mailbox", title: "创建邮箱账号", detail: hasMailbox ? `${overview?.activeMailboxes || 0} 个活跃邮箱` : "给管理员或用户创建第一个邮箱", done: hasMailbox, section: "mailboxes" as Section },
-    { key: "smtp", title: "确认发信配置", detail: settings?.smtpHost ? `${settings.smtpHost}:${settings.smtpPort}` : "配置本机 Postfix 或外部 SMTP", done: !!settings?.smtpHost, section: "settings" as Section },
+    { key: "smtp", title: "确认发信链路", detail: settings?.smtpHost ? `内置 Postfix：${settings.smtpHost}:${settings.smtpPort}` : "默认使用内置 Postfix", done: true, section: "settings" as Section },
     { key: "mail", title: "完成收发测试", detail: hasMail ? `${overview?.messages || 0} 封邮件已入库` : "发送或接收一封测试邮件", done: hasMail, section: "messages" as Section },
   ]
 }
@@ -569,16 +569,25 @@ function SystemSettingsSection({ settings, domains }: { settings?: SystemSetting
       {settingsTab === "smtp" && <Card>
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
-            <CardTitle>SMTP 设置</CardTitle>
+            <div>
+              <CardTitle>发信通道</CardTitle>
+              <CardDescription>单容器默认使用内置 Postfix（127.0.0.1:25），不需要再配置外部 SMTP。只有需要走第三方中继时才修改这里。</CardDescription>
+            </div>
             <TestSMTPDialog disabled={!settings} />
           </div>
         </CardHeader>
-        <CardContent className="grid gap-4 md:grid-cols-2">
-          <Field name="smtpHost" label="SMTP 主机" defaultValue={settings?.smtpHost || ""} required={false} />
-          <Field name="smtpPort" label="SMTP 端口" defaultValue={settings?.smtpPort || "25"} />
-          <Field name="smtpUsername" label="SMTP 用户名" defaultValue={settings?.smtpUsername || ""} required={false} />
-          <Field name="smtpPassword" label={settings?.smtpPasswordSet ? "SMTP 密码（留空不变）" : "SMTP 密码"} type="password" required={false} />
-          <SwitchRow label="强制 TLS" checked={smtpRequireTls} onCheckedChange={setSmtpRequireTls} className="md:col-span-2" />
+        <CardContent className="space-y-4">
+          <div className="rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground">
+            <div className="font-medium text-foreground">当前默认：内置 Postfix</div>
+            <div>Host 填 127.0.0.1、端口 25、用户名/密码留空、强制 TLS 关闭。这里的“强制 TLS”仅用于外部 SMTP 中继（587 STARTTLS 或 465 TLS）。</div>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <Field name="smtpHost" label="发信主机" defaultValue={settings?.smtpHost || ""} placeholder="127.0.0.1" required={false} />
+            <Field name="smtpPort" label="发信端口" defaultValue={settings?.smtpPort || "25"} />
+            <Field name="smtpUsername" label="中继用户名（内置 Postfix 留空）" defaultValue={settings?.smtpUsername || ""} required={false} />
+            <Field name="smtpPassword" label={settings?.smtpPasswordSet ? "中继密码（留空不变）" : "中继密码（内置 Postfix 留空）"} type="password" required={false} />
+            <SwitchRow label="外部中继强制 TLS" checked={smtpRequireTls} onCheckedChange={setSmtpRequireTls} className="md:col-span-2" />
+          </div>
         </CardContent>
       </Card>}
 
