@@ -33,7 +33,7 @@ func (a *App) handleMailboxApplyOptions(w http.ResponseWriter, r *http.Request) 
 
 func (a *App) handleApplyMailbox(w http.ResponseWriter, r *http.Request) {
 	if !a.cfg.UserMailboxApplyEnabled {
-		respondError(w, http.StatusForbidden, "mailbox application is disabled")
+		respondError(w, http.StatusForbidden, "当前未开放邮箱申请")
 		return
 	}
 	user := currentUser(r)
@@ -48,7 +48,7 @@ func (a *App) handleApplyMailbox(w http.ResponseWriter, r *http.Request) {
 	}
 	domainID := strings.TrimSpace(req.DomainID)
 	if domainID == "" {
-		badRequest(w, errors.New("domainId is required"))
+		badRequest(w, errors.New("请选择域名"))
 		return
 	}
 	allowed, err := a.mailboxApplyDomainAllowed(r.Context(), domainID)
@@ -57,17 +57,17 @@ func (a *App) handleApplyMailbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !allowed {
-		respondError(w, http.StatusForbidden, "domain is not available")
+		respondError(w, http.StatusForbidden, "该域名不可用")
 		return
 	}
 
 	localPart := normalizeLocalPart(req.LocalPart)
 	if localPart == "" {
-		badRequest(w, errors.New("localPart is required"))
+		badRequest(w, errors.New("请输入邮箱前缀"))
 		return
 	}
 	if len(localPart) > 64 {
-		badRequest(w, errors.New("localPart is too long"))
+		badRequest(w, errors.New("邮箱前缀过长"))
 		return
 	}
 	reserved := map[string]bool{}
@@ -84,7 +84,7 @@ func (a *App) handleApplyMailbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if exists > 0 {
-		respondError(w, http.StatusConflict, "mailbox already exists")
+		respondError(w, http.StatusConflict, "该邮箱地址已被占用")
 		return
 	}
 
@@ -101,7 +101,7 @@ func (a *App) handleApplyMailbox(w http.ResponseWriter, r *http.Request) {
 	mailboxID, err := a.createMailboxWithPasswordHash(r.Context(), user.ID, domainID, localPart, displayName, passwordHash, 1024, "active")
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
-			respondError(w, http.StatusConflict, "mailbox already exists")
+			respondError(w, http.StatusConflict, "该邮箱地址已被占用")
 			return
 		}
 		badRequest(w, err)

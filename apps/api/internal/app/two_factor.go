@@ -140,12 +140,12 @@ func (a *App) loadUserAuthByID(ctx context.Context, id string) (*User, string, e
 
 func (a *App) handleTwoFactorSetup(w http.ResponseWriter, r *http.Request) {
 	if !a.cfg.TwoFactorEnabled {
-		respondError(w, http.StatusBadRequest, "two-factor authentication is disabled")
+		respondError(w, http.StatusBadRequest, "双因素认证已关闭")
 		return
 	}
 	user := currentUser(r)
 	if user == nil {
-		respondError(w, http.StatusUnauthorized, "authentication required")
+		respondError(w, http.StatusUnauthorized, "需要登录后才能操作")
 		return
 	}
 	current, _, err := a.loadUserAuthByID(r.Context(), user.ID)
@@ -175,12 +175,12 @@ func (a *App) handleTwoFactorSetup(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleTwoFactorEnable(w http.ResponseWriter, r *http.Request) {
 	if !a.cfg.TwoFactorEnabled {
-		respondError(w, http.StatusBadRequest, "two-factor authentication is disabled")
+		respondError(w, http.StatusBadRequest, "双因素认证已关闭")
 		return
 	}
 	user := currentUser(r)
 	if user == nil {
-		respondError(w, http.StatusUnauthorized, "authentication required")
+		respondError(w, http.StatusUnauthorized, "需要登录后才能操作")
 		return
 	}
 	var req struct {
@@ -222,7 +222,7 @@ func (a *App) handleTwoFactorEnable(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleTwoFactorDisable(w http.ResponseWriter, r *http.Request) {
 	user := currentUser(r)
 	if user == nil {
-		respondError(w, http.StatusUnauthorized, "authentication required")
+		respondError(w, http.StatusUnauthorized, "需要登录后才能操作")
 		return
 	}
 	var req struct {

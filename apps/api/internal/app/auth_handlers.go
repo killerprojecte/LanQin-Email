@@ -24,52 +24,52 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.ChallengeToken) != "" {
 		challenge, err := a.loginChallengeByToken(r.Context(), req.ChallengeToken)
 		if err != nil {
-			respondError(w, http.StatusUnauthorized, "invalid verification challenge")
+			respondError(w, http.StatusUnauthorized, "验证已过期，请重新登录")
 			return
 		}
 		user, secret, err := a.loadUserAuthByID(r.Context(), challenge.UserID)
 		if err != nil || user.Disabled || !user.TwoFactorEnabled || strings.TrimSpace(secret) == "" {
 			a.deleteLoginChallenge(r.Context(), challenge.ID)
-			respondError(w, http.StatusUnauthorized, "invalid verification challenge")
+			respondError(w, http.StatusUnauthorized, "验证已过期，请重新登录")
 			return
 		}
 		if !verifyTOTP(secret, req.TwoFactorCode, a.now().UTC()) {
-			respondError(w, http.StatusUnauthorized, "invalid verification code")
+			respondError(w, http.StatusUnauthorized, "验证码错误")
 			return
 		}
 		a.deleteLoginChallenge(r.Context(), challenge.ID)
 		if err := a.issueSession(w, r, user.ID); err != nil {
-			respondError(w, http.StatusInternalServerError, "failed to create session")
+			respondError(w, http.StatusInternalServerError, "登录失败，请稍后重试")
 			return
 		}
 		respondJSON(w, http.StatusOK, map[string]any{"user": user})
 		return
 	}
 	if err := a.verifyTurnstile(r.Context(), req.TurnstileToken, r.RemoteAddr); err != nil {
-		respondError(w, http.StatusUnauthorized, "human verification failed")
+		respondError(w, http.StatusUnauthorized, "人机验证失败，请重试")
 		return
 	}
 	email := normalizeEmail(req.Email)
 	user, passwordHash, err := a.userByEmail(r.Context(), email)
 	if err != nil || user.Disabled {
-		respondError(w, http.StatusUnauthorized, "invalid email or password")
+		respondError(w, http.StatusUnauthorized, "邮箱或密码错误")
 		return
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(req.Password)); err != nil {
-		respondError(w, http.StatusUnauthorized, "invalid email or password")
+		respondError(w, http.StatusUnauthorized, "邮箱或密码错误")
 		return
 	}
 	if a.cfg.TwoFactorEnabled && user.TwoFactorEnabled {
 		challengeToken, err := a.createLoginChallenge(r.Context(), user.ID)
 		if err != nil {
-			respondError(w, http.StatusInternalServerError, "failed to create verification challenge")
+			respondError(w, http.StatusInternalServerError, "验证码生成失败，请稍后重试")
 			return
 		}
 		respondJSON(w, http.StatusOK, map[string]any{"twoFactorRequired": true, "challengeToken": challengeToken})
 		return
 	}
 	if err := a.issueSession(w, r, user.ID); err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to create session")
+		respondError(w, http.StatusInternalServerError, "登录失败，请稍后重试")
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{"user": user})
@@ -77,7 +77,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if !a.cfg.OpenRegistration {
-		respondError(w, http.StatusForbidden, "registration is closed")
+		respondError(w, http.StatusForbidden, "当前未开放注册")
 		return
 	}
 	var req struct {
@@ -93,16 +93,16 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.verifyTurnstile(r.Context(), req.TurnstileToken, r.RemoteAddr); err != nil {
-		respondError(w, http.StatusUnauthorized, "human verification failed")
+		respondError(w, http.StatusUnauthorized, "人机验证失败，请重试")
 		return
 	}
 	email := normalizeEmail(req.Email)
 	if email == "" || !strings.Contains(email, "@") {
-		badRequest(w, errors.New("invalid email"))
+		badRequest(w, errors.New("邮箱地址无效"))
 		return
 	}
 	if len(req.Password) < 8 {
-		badRequest(w, errors.New("password must be at least 8 characters"))
+		badRequest(w, errors.New("密码至少需要 8 个字符"))
 		return
 	}
 	displayName := strings.TrimSpace(req.DisplayName)
@@ -110,11 +110,11 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 		displayName = strings.Split(email, "@")[0]
 	}
 	if len([]rune(displayName)) > 80 {
-		badRequest(w, errors.New("displayName must be at most 80 characters"))
+		badRequest(w, errors.New("显示名称不能超过 80 个字符"))
 		return
 	}
 	if _, _, err := a.userByEmail(r.Context(), email); err == nil {
-		respondError(w, http.StatusConflict, "email already registered")
+		respondError(w, http.StatusConflict, "该邮箱已被注册")
 		return
 	} else if !errors.Is(err, errNotFound) {
 		respondError(w, http.StatusInternalServerError, "failed to check user")
@@ -130,10 +130,10 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if _, err := a.db.ExecContext(r.Context(), `INSERT INTO users(id,email,display_name,role,password_hash,disabled,created_at,updated_at)
 		VALUES(?,?,?,?,?,?,?,?)`, userID, email, displayName, "user", string(passwordHash), 0, now, now); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
-			respondError(w, http.StatusConflict, "email already registered")
+			respondError(w, http.StatusConflict, "该邮箱已被注册")
 			return
 		}
-		respondError(w, http.StatusInternalServerError, "failed to create user")
+		respondError(w, http.StatusInternalServerError, "注册失败，请稍后重试")
 		return
 	}
 	user, err := a.userByID(r.Context(), userID)
@@ -142,7 +142,7 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.issueSession(w, r, user.ID); err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to create session")
+		respondError(w, http.StatusInternalServerError, "登录失败，请稍后重试")
 		return
 	}
 
@@ -169,7 +169,7 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 			reserved[item] = true
 		}
 		if reserved[mailboxLocalPart] {
-			respondError(w, http.StatusForbidden, "localPart is reserved")
+			respondError(w, http.StatusForbidden, "该前缀已被保留，请使用其他前缀")
 			return
 		}
 		if _, mbErr := a.createMailboxWithPasswordHash(r.Context(), user.ID, mailboxDomainID, mailboxLocalPart, displayName, string(passwordHash), 1024, "active"); mbErr != nil {
@@ -203,11 +203,11 @@ func (a *App) handleUpdateProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	displayName := strings.TrimSpace(req.DisplayName)
 	if displayName == "" {
-		badRequest(w, errors.New("displayName is required"))
+		badRequest(w, errors.New("请输入显示名称"))
 		return
 	}
 	if len([]rune(displayName)) > 80 {
-		badRequest(w, errors.New("displayName must be at most 80 characters"))
+		badRequest(w, errors.New("显示名称不能超过 80 个字符"))
 		return
 	}
 	_, err := a.db.ExecContext(r.Context(), `UPDATE users SET display_name=?, updated_at=? WHERE id=?`,
@@ -235,7 +235,7 @@ func (a *App) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(req.NewPassword) < 8 {
-		badRequest(w, errors.New("newPassword must be at least 8 characters"))
+		badRequest(w, errors.New("新密码至少需要 8 个字符"))
 		return
 	}
 	row := a.db.QueryRowContext(r.Context(), `SELECT password_hash FROM users WHERE id=?`, user.ID)
@@ -245,7 +245,7 @@ func (a *App) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(currentHash), []byte(req.CurrentPassword)); err != nil {
-		respondError(w, http.StatusUnauthorized, "current password is incorrect")
+		respondError(w, http.StatusUnauthorized, "当前密码错误")
 		return
 	}
 	newHash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
