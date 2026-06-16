@@ -1,5 +1,5 @@
-smtp      inet  n       -       y       -       -       smtpd
-submission inet n       -       y       -       -       smtpd
+smtp      inet  n       -       n       -       -       smtpd
+submission inet n       -       n       -       -       smtpd
   -o syslog_name=postfix/submission
   -o smtpd_tls_security_level=may
   -o smtpd_sasl_auth_enable=yes

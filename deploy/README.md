@@ -128,6 +128,27 @@ docker compose -f docker-compose.stack.yml -f docker-compose.stack.build.yml up 
 - Go API 是 Webmail 和管理后台唯一入口；浏览器不直接连接 SMTP/IMAP。
 - Go API 会读取 `LANQIN_MAILDIR_ROOT=/var/mail/vhosts`，周期扫描 Maildir，把 Postfix/Dovecot 入站邮件同步成 Webmail 索引。
 
+## SMTP 发信排查
+
+单容器部署时，Webmail 发信默认提交给同容器内的 Postfix：
+
+```env
+LANQIN_SMTP_HOST=127.0.0.1
+LANQIN_SMTP_PORT=25
+LANQIN_SMTP_REQUIRE_TLS=false
+```
+
+如果页面提示 `smtp delivery failed: EOF`，通常是 Postfix 会话被中断。优先检查：
+
+```bash
+docker compose exec lanqin-email supervisorctl status
+docker compose exec lanqin-email postconf -M smtp/inet submission/inet
+docker compose exec lanqin-email sqlite3 /data/lanqin.db "select key,value from system_settings where key like 'smtp%' order by key;"
+docker compose logs --tail=200 lanqin-email
+```
+
+确认后台“系统设置”里没有把本机 Postfix 的 `SMTP Require TLS` 打开；本机 `127.0.0.1:25` 必须保持 TLS=false。
+
 ## 生产注意
 
 - 建议在服务器或边缘网关配置 HTTPS。
