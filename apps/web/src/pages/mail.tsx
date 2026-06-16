@@ -54,6 +54,7 @@ type MailFilter = "all" | "unread" | "starred" | "attachments"
 type MailView = "folder" | "starred" | "label"
 type MailListResponse = { items?: MailMessage[]; nextCursor?: string }
 type PendingConfirm = { title: string; description?: string; confirmText: string; onConfirm: () => void }
+type MailNotificationState = { latestId: string; latestReceivedAt: string }
 type MailMenuItem =
   | { type: "starred"; key: string; label: string; icon: React.ReactNode; count: number }
   | { type: "folder"; key: string; folderName: string; label: string; icon: React.ReactNode; count: number }
@@ -88,6 +89,8 @@ export function MailPage() {
   const [pendingConfirm, setPendingConfirm] = React.useState<PendingConfirm | null>(null)
   const sidebarPanelRef = React.useRef<ImperativePanelHandle>(null)
   const themeMountedRef = React.useRef(false)
+  const mailNotifyStateRef = React.useRef<Record<string, MailNotificationState>>({})
+  const mailAudioContextRef = React.useRef<AudioContext | null>(null)
 
   const mailboxList = useQuery({ queryKey: ["mailboxes", "mine"], queryFn: api.myMailboxes })
   const publicSettings = useQuery({ queryKey: ["public-settings"], queryFn: api.publicSettings })
@@ -97,6 +100,14 @@ export function MailPage() {
   const folders = useQuery({ queryKey: ["folders", activeMailboxId], queryFn: () => api.folders(activeMailboxId), enabled: !!activeMailboxId })
   const labels = useQuery({ queryKey: ["labels", activeMailboxId], queryFn: () => api.labels(activeMailboxId), enabled: !!activeMailboxId })
   const mailStats = useQuery({ queryKey: ["mail-stats", activeMailboxId], queryFn: () => api.mailStats(activeMailboxId), enabled: !!activeMailboxId })
+  const mailRefreshInterval = publicSettings.data?.mailAutoRefresh ? Math.max(publicSettings.data.mailRefreshMs || 30000, 5000) : false
+  const inboxProbe = useQuery({
+    queryKey: ["mail-notifications", activeMailboxId],
+    queryFn: () => api.messages("Inbox", "", "", activeMailboxId),
+    enabled: !!activeMailboxId,
+    refetchInterval: mailRefreshInterval,
+    refetchIntervalInBackground: true,
+  })
   const messages = useInfiniteQuery({
     queryKey: ["messages", activeMailboxId, mailView, folder, selectedLabelId, query],
     queryFn: ({ pageParam }) => {
@@ -225,26 +236,81 @@ export function MailPage() {
   }, [darkMode])
 
   React.useEffect(() => {
+    const unlock = () => {
+      const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+      if (AudioContextCtor && !mailAudioContextRef.current) {
+        const ctx = new AudioContextCtor()
+        mailAudioContextRef.current = ctx
+        if (ctx.state === "suspended") void ctx.resume()
+      }
+      if ("Notification" in window && Notification.permission === "default") {
+        void Notification.requestPermission()
+      }
+    }
+    window.addEventListener("pointerdown", unlock, { once: true })
+    window.addEventListener("keydown", unlock, { once: true })
+    return () => {
+      window.removeEventListener("pointerdown", unlock)
+      window.removeEventListener("keydown", unlock)
+    }
+  }, [])
+
+  React.useEffect(() => {
+    if (!activeMailboxId || !inboxProbe.data?.items) return
+    const items = inboxProbe.data.items
+    const latest = items[0]
+    const nextState = { latestId: latest?.id || "", latestReceivedAt: latest?.receivedAt || "" }
+    const prevState = mailNotifyStateRef.current[activeMailboxId]
+    if (!prevState) {
+      mailNotifyStateRef.current[activeMailboxId] = nextState
+      return
+    }
+    const newMessages = items.filter((item) => item.receivedAt > prevState.latestReceivedAt && item.id !== prevState.latestId)
+    mailNotifyStateRef.current[activeMailboxId] = nextState
+    if (newMessages.length === 0) return
+
+    const first = newMessages[0]
+    const title = newMessages.length > 1 ? `收到 ${newMessages.length} 封新邮件` : `新邮件：${first.subject || "(无主题)"}`
+    const description = newMessages.length > 1 ? `${first.from} 等发来新邮件` : `${first.from}${first.snippet ? ` · ${first.snippet}` : ""}`
+    toast({ title, description })
+    playIncomingMailSound(mailAudioContextRef)
+    if ("Notification" in window && Notification.permission === "granted") {
+      const notification = new Notification(title, {
+        body: description,
+        tag: `lanqin-mail-${activeMailboxId}`,
+      })
+      notification.onclick = () => {
+        window.focus()
+        setMailView("folder")
+        setFolder("Inbox")
+        setSelectedId(first.id)
+        notification.close()
+      }
+    }
+  }, [activeMailboxId, inboxProbe.data?.items, toast])
+
+  React.useEffect(() => {
     const events = new EventSource("/api/events", { withCredentials: true })
     events.addEventListener("sync", () => {
       qc.invalidateQueries({ queryKey: ["folders"] })
       qc.invalidateQueries({ queryKey: ["mail-stats"] })
       qc.invalidateQueries({ queryKey: ["labels"] })
+      qc.invalidateQueries({ queryKey: ["mail-notifications"] })
     })
     return () => events.close()
   }, [qc])
 
   React.useEffect(() => {
     if (!publicSettings.data?.mailAutoRefresh) return
-    const interval = Math.max(publicSettings.data.mailRefreshMs || 30000, 5000)
     const timer = window.setInterval(() => {
       qc.invalidateQueries({ queryKey: ["messages"] })
       qc.invalidateQueries({ queryKey: ["folders"] })
       qc.invalidateQueries({ queryKey: ["mail-stats"] })
       qc.invalidateQueries({ queryKey: ["labels"] })
-    }, interval)
+      qc.invalidateQueries({ queryKey: ["mail-notifications"] })
+    }, mailRefreshInterval || 30000)
     return () => window.clearInterval(timer)
-  }, [publicSettings.data?.mailAutoRefresh, publicSettings.data?.mailRefreshMs, qc])
+  }, [mailRefreshInterval, publicSettings.data?.mailAutoRefresh, qc])
 
   const selected = detail.data
   const allMessages = messages.data?.pages.flatMap((page) => page.items || []) || []
@@ -1334,6 +1400,28 @@ function ToolbarButton({ label, children, onClick, disabled }: { label: string; 
 
 function splitEmails(s: string) { return s.split(/[;,，\s]+/).map((v) => v.trim()).filter(Boolean) }
 function markdownToHtml(value: string) { return DOMPurify.sanitize(marked.parse(value, { async: false, breaks: true })) }
+function playIncomingMailSound(ref: React.MutableRefObject<AudioContext | null>) {
+  const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+  if (!AudioContextCtor) return
+  const ctx = ref.current || new AudioContextCtor()
+  ref.current = ctx
+  if (ctx.state === "suspended") void ctx.resume()
+  const now = ctx.currentTime
+  const gain = ctx.createGain()
+  gain.gain.setValueAtTime(0.0001, now)
+  gain.gain.exponentialRampToValueAtTime(0.12, now + 0.02)
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.45)
+  gain.connect(ctx.destination)
+  for (const [index, frequency] of [880, 1175].entries()) {
+    const osc = ctx.createOscillator()
+    const start = now + index * 0.14
+    osc.type = "sine"
+    osc.frequency.setValueAtTime(frequency, start)
+    osc.connect(gain)
+    osc.start(start)
+    osc.stop(start + 0.18)
+  }
+}
 function withPrefix(subject: string, prefix: string) { return subject.toLowerCase().startsWith(prefix.toLowerCase()) ? subject : `${prefix} ${subject}` }
 function quoteMessage(message: MailMessage) {
   const body = message.bodyText || stripHtml(message.bodyHtml || message.snippet || "")
