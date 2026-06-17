@@ -1664,7 +1664,11 @@ function ComposeDialog({ mailbox, open, draft, onOpenChange, onSent }: { mailbox
   }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="w-[min(96vw,82rem)] max-w-none overflow-hidden p-0">
+      <DialogContent
+        className="w-[min(96vw,82rem)] max-w-none overflow-hidden p-0"
+        onInteractOutside={(event) => event.preventDefault()}
+        onPointerDownOutside={(event) => event.preventDefault()}
+      >
         <form key={draft?.key || "new"} className="flex max-h-[90vh] flex-col" onSubmit={submit}>
           <DialogHeader className="border-b px-6 py-4 text-left">
             <DialogTitle className="flex items-center justify-between gap-4">
