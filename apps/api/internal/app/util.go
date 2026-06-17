@@ -133,6 +133,13 @@ func boolInt(v bool) int {
 
 func intBool(v int) bool { return v != 0 }
 
+func nullableString(v string) any {
+	if strings.TrimSpace(v) == "" {
+		return nil
+	}
+	return v
+}
+
 func parseTime(v string) time.Time {
 	t, _ := time.Parse(time.RFC3339Nano, v)
 	return t

@@ -68,9 +68,10 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		db.Close()
 		return nil, err
 	}
+	workerCtx, cancel := context.WithCancel(context.Background())
+	a.workerCancel = cancel
+	go a.scheduledSendWorker(workerCtx)
 	if strings.TrimSpace(cfg.MaildirRoot) != "" {
-		workerCtx, cancel := context.WithCancel(context.Background())
-		a.workerCancel = cancel
 		go a.maildirWorker(workerCtx)
 	}
 	return a, nil
@@ -223,6 +224,20 @@ func (a *App) migrate(ctx context.Context) error {
 			storage_path TEXT NOT NULL,
 			created_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS scheduled_sends (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			mailbox_id TEXT NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+			draft_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+			payload_json TEXT NOT NULL,
+			send_at TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			error TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			sent_at TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_scheduled_sends_due ON scheduled_sends(status, send_at)`,
 		`CREATE TABLE IF NOT EXISTS contacts (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,

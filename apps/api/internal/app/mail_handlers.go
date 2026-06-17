@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -283,17 +284,57 @@ func (a *App) handleMailMessage(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, msg)
 }
 
+type mailComposeInput struct {
+	MailboxID   string            `json:"mailboxId"`
+	To          []string          `json:"to"`
+	CC          []string          `json:"cc"`
+	BCC         []string          `json:"bcc"`
+	Subject     string            `json:"subject"`
+	Text        string            `json:"text"`
+	HTML        string            `json:"html"`
+	Attachments []AttachmentInput `json:"attachments"`
+}
+
+type mailDraftInput struct {
+	MailboxID   string             `json:"mailboxId"`
+	To          []string           `json:"to"`
+	CC          []string           `json:"cc"`
+	BCC         []string           `json:"bcc"`
+	Subject     string             `json:"subject"`
+	Text        string             `json:"text"`
+	HTML        string             `json:"html"`
+	Attachments *[]AttachmentInput `json:"attachments"`
+}
+
+type scheduledSendPayload struct {
+	MailboxID   string            `json:"mailboxId"`
+	To          []string          `json:"to"`
+	CC          []string          `json:"cc"`
+	BCC         []string          `json:"bcc"`
+	Subject     string            `json:"subject"`
+	Text        string            `json:"text"`
+	HTML        string            `json:"html"`
+	Attachments []AttachmentInput `json:"attachments"`
+	DraftID     string            `json:"draftId,omitempty"`
+}
+
+type ScheduledSend struct {
+	ID        string     `json:"id"`
+	MailboxID string     `json:"mailboxId"`
+	DraftID   string     `json:"draftId,omitempty"`
+	Subject   string     `json:"subject"`
+	To        []string   `json:"to"`
+	Snippet   string     `json:"snippet"`
+	SendAt    time.Time  `json:"sendAt"`
+	Status    string     `json:"status"`
+	Error     string     `json:"error,omitempty"`
+	CreatedAt time.Time  `json:"createdAt"`
+	UpdatedAt time.Time  `json:"updatedAt"`
+	SentAt    *time.Time `json:"sentAt,omitempty"`
+}
+
 func (a *App) handleMailSend(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		MailboxID   string            `json:"mailboxId"`
-		To          []string          `json:"to"`
-		CC          []string          `json:"cc"`
-		BCC         []string          `json:"bcc"`
-		Subject     string            `json:"subject"`
-		Text        string            `json:"text"`
-		HTML        string            `json:"html"`
-		Attachments []AttachmentInput `json:"attachments"`
-	}
+	var req mailComposeInput
 	if err := decodeJSON(r, &req); err != nil {
 		badRequest(w, err)
 		return
@@ -303,11 +344,34 @@ func (a *App) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusNotFound, "mailbox not found")
 		return
 	}
+	msg, err := a.sendMailNow(r.Context(), mb, req)
+	if err != nil {
+		if errors.Is(err, errNoRecipients) {
+			badRequest(w, err)
+			return
+		}
+		if errors.Is(err, errInvalidMIME) {
+			badRequest(w, err)
+			return
+		}
+		if strings.HasPrefix(err.Error(), "smtp delivery failed:") {
+			respondError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusCreated, msg)
+}
+
+var errNoRecipients = errors.New("at least one recipient is required")
+var errInvalidMIME = errors.New("invalid mime message")
+
+func (a *App) sendMailNow(ctx context.Context, mb *Mailbox, req mailComposeInput) (*MailMessage, error) {
 	req.To, req.CC, req.BCC = dedupeEmails(req.To), dedupeEmails(req.CC), dedupeEmails(req.BCC)
 	allRecipients := append(append([]string{}, req.To...), append(req.CC, req.BCC...)...)
 	if len(allRecipients) == 0 {
-		badRequest(w, errors.New("at least one recipient is required"))
-		return
+		return nil, errNoRecipients
 	}
 	if strings.TrimSpace(req.Subject) == "" {
 		req.Subject = "(no subject)"
@@ -326,26 +390,22 @@ func (a *App) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		From: mb.Address, FromName: mb.DisplayName, To: req.To, CC: req.CC, BCC: req.BCC, Subject: req.Subject, Text: req.Text, HTML: req.HTML, MessageID: messageID, Date: now, Attachments: req.Attachments,
 	})
 	if err != nil {
-		badRequest(w, err)
-		return
+		return nil, fmt.Errorf("%w: %v", errInvalidMIME, err)
 	}
 	if a.cfg.SMTPHost != "" {
 		if err := a.sendSMTP(mb.Address, allRecipients, mimeBytes); err != nil {
-			respondError(w, http.StatusBadGateway, "smtp delivery failed: "+err.Error())
-			return
+			return nil, fmt.Errorf("smtp delivery failed: %w", err)
 		}
 	}
 
-	sentFolderID, err := a.ensureFolder(r.Context(), mb.ID, "Sent")
+	sentFolderID, err := a.ensureFolder(ctx, mb.ID, "Sent")
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to load sent folder")
-		return
+		return nil, fmt.Errorf("failed to load sent folder: %w", err)
 	}
 	base := storedMessage{MailboxID: mb.ID, FolderID: sentFolderID, MessageUID: newID("uid"), MessageID: messageID, Subject: req.Subject, From: mb.Address, FromName: mb.DisplayName, To: req.To, CC: req.CC, BCC: req.BCC, SentAt: now, ReceivedAt: now, Snippet: snippetFrom(req.Text, req.HTML), BodyText: req.Text, BodyHTML: req.HTML, IsRead: true}
-	sentID, err := a.insertMessage(r.Context(), base, req.Attachments)
+	sentID, err := a.insertMessage(ctx, base, req.Attachments)
 	if err != nil {
-		respondError(w, http.StatusInternalServerError, "failed to store sent message")
-		return
+		return nil, fmt.Errorf("failed to store sent message: %w", err)
 	}
 
 	// Development/local-domain delivery: known local recipients go to their Inbox.
@@ -354,9 +414,9 @@ func (a *App) handleMailSend(w http.ResponseWriter, r *http.Request) {
 	localRecipients := append(req.To, req.CC...)
 	localRecipients = append(localRecipients, req.BCC...)
 	for _, rcpt := range localRecipients {
-		rcptMailbox, err := a.mailboxByAddress(r.Context(), rcpt)
+		rcptMailbox, err := a.mailboxByAddress(ctx, rcpt)
 		if err != nil {
-			if !a.cfg.CatchAllEnabled || !a.isLocalDomainAddress(r.Context(), rcpt) {
+			if !a.cfg.CatchAllEnabled || !a.isLocalDomainAddress(ctx, rcpt) {
 				continue
 			}
 			copyMsg := base
@@ -365,22 +425,22 @@ func (a *App) handleMailSend(w http.ResponseWriter, r *http.Request) {
 			copyMsg.RecipientAddr = normalizeEmail(rcpt)
 			copyMsg.MessageUID = newID("uid")
 			copyMsg.IsRead = false
-			_, _ = a.insertMessage(r.Context(), copyMsg, req.Attachments)
+			_, _ = a.insertMessage(ctx, copyMsg, req.Attachments)
 			continue
 		}
 		if rcptMailbox.Status != "active" {
-			if a.cfg.CatchAllEnabled && a.isLocalDomainAddress(r.Context(), rcpt) {
+			if a.cfg.CatchAllEnabled && a.isLocalDomainAddress(ctx, rcpt) {
 				copyMsg := base
 				copyMsg.MailboxID = ""
 				copyMsg.FolderID = ""
 				copyMsg.RecipientAddr = normalizeEmail(rcpt)
 				copyMsg.MessageUID = newID("uid")
 				copyMsg.IsRead = false
-				_, _ = a.insertMessage(r.Context(), copyMsg, req.Attachments)
+				_, _ = a.insertMessage(ctx, copyMsg, req.Attachments)
 			}
 			continue
 		}
-		inboxID, err := a.ensureFolder(r.Context(), rcptMailbox.ID, "Inbox")
+		inboxID, err := a.ensureFolder(ctx, rcptMailbox.ID, "Inbox")
 		if err != nil {
 			continue
 		}
@@ -389,13 +449,346 @@ func (a *App) handleMailSend(w http.ResponseWriter, r *http.Request) {
 		copyMsg.FolderID = inboxID
 		copyMsg.MessageUID = newID("uid")
 		copyMsg.IsRead = false
-		if inboxMsgID, err := a.insertMessage(r.Context(), copyMsg, req.Attachments); err == nil {
-			a.applyInboundControls(r.Context(), inboxMsgID, rcptMailbox.ID, copyMsg.From, copyMsg.Subject)
+		if inboxMsgID, err := a.insertMessage(ctx, copyMsg, req.Attachments); err == nil {
+			a.applyInboundControls(ctx, inboxMsgID, rcptMailbox.ID, copyMsg.From, copyMsg.Subject)
 		}
 	}
 
-	msg, _ := a.messageByID(r.Context(), sentID, true)
-	respondJSON(w, http.StatusCreated, msg)
+	msg, _ := a.messageByID(ctx, sentID, true)
+	return msg, nil
+}
+
+func (a *App) handleSaveDraft(w http.ResponseWriter, r *http.Request) {
+	var req mailDraftInput
+	if err := decodeJSON(r, &req); err != nil {
+		badRequest(w, err)
+		return
+	}
+	mb, err := a.mailboxForCurrentUserWithID(r, req.MailboxID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "mailbox not found")
+		return
+	}
+	compose := mailComposeInput{MailboxID: req.MailboxID, To: req.To, CC: req.CC, BCC: req.BCC, Subject: req.Subject, Text: req.Text, HTML: req.HTML}
+	compose.To, compose.CC, compose.BCC = dedupeEmails(compose.To), dedupeEmails(compose.CC), dedupeEmails(compose.BCC)
+	subject := strings.TrimSpace(compose.Subject)
+	if subject == "" {
+		subject = "(无主题)"
+	}
+	compose.HTML = a.policy.Sanitize(compose.HTML)
+	if strings.TrimSpace(compose.Text) == "" {
+		compose.Text = stripTags(compose.HTML)
+	}
+	if strings.TrimSpace(compose.HTML) == "" && strings.TrimSpace(compose.Text) != "" {
+		compose.HTML = "<p>" + htmlEscape(compose.Text) + "</p>"
+	}
+
+	now := a.now().UTC()
+	draftID := strings.TrimSpace(chi.URLParam(r, "id"))
+	draftsFolderID, err := a.ensureFolder(r.Context(), mb.ID, "Drafts")
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to load drafts folder")
+		return
+	}
+	if draftID == "" {
+		messageID := fmt.Sprintf("<%s@%s>", newID("draft"), strings.Split(mb.Address, "@")[1])
+		attachments := []AttachmentInput{}
+		if req.Attachments != nil {
+			attachments = *req.Attachments
+		}
+		stored := storedMessage{MailboxID: mb.ID, FolderID: draftsFolderID, MessageUID: newID("uid"), MessageID: messageID, Subject: subject, From: mb.Address, FromName: mb.DisplayName, To: compose.To, CC: compose.CC, BCC: compose.BCC, SentAt: now, ReceivedAt: now, Snippet: snippetFrom(compose.Text, compose.HTML), BodyText: compose.Text, BodyHTML: compose.HTML, IsRead: true}
+		draftID, err = a.insertMessage(r.Context(), stored, attachments)
+		if err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to save draft")
+			return
+		}
+		msg, _ := a.messageByID(r.Context(), draftID, true)
+		respondJSON(w, http.StatusCreated, msg)
+		return
+	}
+
+	existing, err := a.loadMessageForRequest(r, draftID, false)
+	if err != nil || !strings.EqualFold(existing.Folder, "Drafts") || existing.MailboxID != mb.ID {
+		respondError(w, http.StatusNotFound, "draft not found")
+		return
+	}
+	size := int64(len(compose.Text) + len(compose.HTML))
+	hasAttachments := existing.HasAttachments
+	if req.Attachments != nil {
+		a.deleteMessageFiles(r.Context(), draftID)
+		if _, err := a.db.ExecContext(r.Context(), `DELETE FROM attachments WHERE message_id=?`, draftID); err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to replace draft attachments")
+			return
+		}
+		hasAttachments = len(*req.Attachments) > 0
+		for _, att := range *req.Attachments {
+			if decoded, err := base64.StdEncoding.DecodeString(att.ContentBase64); err == nil {
+				size += int64(len(decoded))
+			}
+		}
+	} else {
+		var attachmentBytes int64
+		_ = a.db.QueryRowContext(r.Context(), `SELECT COALESCE(SUM(size_bytes),0) FROM attachments WHERE message_id=?`, draftID).Scan(&attachmentBytes)
+		size += attachmentBytes
+	}
+	_, err = a.db.ExecContext(r.Context(), `UPDATE messages SET subject=?,to_addrs=?,cc_addrs=?,bcc_addrs=?,sent_at=?,received_at=?,snippet=?,body_text=?,body_html=?,is_read=1,has_attachments=?,size_bytes=?,updated_at=? WHERE id=?`,
+		subject, jsonEncode(compose.To), jsonEncode(compose.CC), jsonEncode(compose.BCC), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), snippetFrom(compose.Text, compose.HTML), compose.Text, compose.HTML, boolInt(hasAttachments), size, now.Format(time.RFC3339Nano), draftID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to update draft")
+		return
+	}
+	if req.Attachments != nil {
+		for _, att := range *req.Attachments {
+			if err := a.storeAttachment(r.Context(), draftID, att); err != nil {
+				respondError(w, http.StatusInternalServerError, "failed to store draft attachment")
+				return
+			}
+		}
+	}
+	msg, _ := a.messageByID(r.Context(), draftID, true)
+	respondJSON(w, http.StatusOK, msg)
+}
+
+func (a *App) handleDeleteDraft(w http.ResponseWriter, r *http.Request) {
+	msg, err := a.loadMessageForRequest(r, chi.URLParam(r, "id"), false)
+	if err != nil || !strings.EqualFold(msg.Folder, "Drafts") {
+		respondError(w, http.StatusNotFound, "draft not found")
+		return
+	}
+	a.deleteMessageFiles(r.Context(), msg.ID)
+	if _, err := a.db.ExecContext(r.Context(), `DELETE FROM messages WHERE id=?`, msg.ID); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to delete draft")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (a *App) handleScheduledSends(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	mb, err := a.mailboxForCurrentUser(r)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "mailbox not found")
+		return
+	}
+	rows, err := a.db.QueryContext(r.Context(), `SELECT id,mailbox_id,draft_id,payload_json,send_at,status,error,created_at,updated_at,sent_at
+		FROM scheduled_sends
+		WHERE user_id=? AND mailbox_id=? AND status IN ('pending','sending','failed')
+		ORDER BY send_at ASC, created_at DESC`, user.ID, mb.ID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to load scheduled sends")
+		return
+	}
+	defer rows.Close()
+	items := []ScheduledSend{}
+	for rows.Next() {
+		var item ScheduledSend
+		var draftID, errorText, sentAt sql.NullString
+		var payloadJSON, sendAt, createdAt, updatedAt string
+		if err := rows.Scan(&item.ID, &item.MailboxID, &draftID, &payloadJSON, &sendAt, &item.Status, &errorText, &createdAt, &updatedAt, &sentAt); err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to scan scheduled sends")
+			return
+		}
+		if draftID.Valid {
+			item.DraftID = draftID.String
+		}
+		if errorText.Valid {
+			item.Error = errorText.String
+		}
+		item.SendAt = parseTime(sendAt)
+		item.CreatedAt = parseTime(createdAt)
+		item.UpdatedAt = parseTime(updatedAt)
+		item.SentAt = nullableTime(sentAt)
+		applyScheduledSendPreview(&item, payloadJSON)
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to load scheduled sends")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (a *App) handleScheduleSend(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		MailboxID   string            `json:"mailboxId"`
+		To          []string          `json:"to"`
+		CC          []string          `json:"cc"`
+		BCC         []string          `json:"bcc"`
+		Subject     string            `json:"subject"`
+		Text        string            `json:"text"`
+		HTML        string            `json:"html"`
+		Attachments []AttachmentInput `json:"attachments"`
+		DraftID     string            `json:"draftId"`
+		SendAt      string            `json:"sendAt"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		badRequest(w, err)
+		return
+	}
+	mb, err := a.mailboxForCurrentUserWithID(r, req.MailboxID)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "mailbox not found")
+		return
+	}
+	sendAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(req.SendAt))
+	if err != nil {
+		badRequest(w, errors.New("sendAt is required"))
+		return
+	}
+	if !sendAt.After(a.now().Add(30 * time.Second)) {
+		badRequest(w, errors.New("sendAt must be in the future"))
+		return
+	}
+	compose := mailComposeInput{MailboxID: req.MailboxID, To: req.To, CC: req.CC, BCC: req.BCC, Subject: req.Subject, Text: req.Text, HTML: req.HTML, Attachments: req.Attachments}
+	compose.To, compose.CC, compose.BCC = dedupeEmails(compose.To), dedupeEmails(compose.CC), dedupeEmails(compose.BCC)
+	if len(append(append([]string{}, compose.To...), append(compose.CC, compose.BCC...)...)) == 0 {
+		badRequest(w, errNoRecipients)
+		return
+	}
+	compose.HTML = a.policy.Sanitize(compose.HTML)
+	if strings.TrimSpace(compose.Text) == "" {
+		compose.Text = stripTags(compose.HTML)
+	}
+	if strings.TrimSpace(compose.HTML) == "" {
+		compose.HTML = "<p>" + htmlEscape(compose.Text) + "</p>"
+	}
+	if strings.TrimSpace(compose.Subject) == "" {
+		compose.Subject = "(no subject)"
+	}
+	draftID := strings.TrimSpace(req.DraftID)
+	if draftID != "" {
+		msg, err := a.loadMessageForRequest(r, draftID, false)
+		if err != nil || !strings.EqualFold(msg.Folder, "Drafts") || msg.MailboxID != mb.ID {
+			respondError(w, http.StatusNotFound, "draft not found")
+			return
+		}
+	}
+	now := a.now().UTC().Format(time.RFC3339Nano)
+	payload := scheduledSendPayload{MailboxID: compose.MailboxID, To: compose.To, CC: compose.CC, BCC: compose.BCC, Subject: compose.Subject, Text: compose.Text, HTML: compose.HTML, Attachments: compose.Attachments, DraftID: draftID}
+	item := ScheduledSend{ID: newID("sched"), MailboxID: mb.ID, DraftID: draftID, Subject: payload.Subject, To: payload.To, Snippet: snippetFrom(payload.Text, payload.HTML), SendAt: sendAt.UTC(), Status: "pending", CreatedAt: parseTime(now), UpdatedAt: parseTime(now)}
+	if _, err := a.db.ExecContext(r.Context(), `INSERT INTO scheduled_sends(id,user_id,mailbox_id,draft_id,payload_json,send_at,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, item.ID, currentUser(r).ID, mb.ID, nullableString(draftID), jsonEncode(payload), item.SendAt.Format(time.RFC3339Nano), item.Status, now, now); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to schedule send")
+		return
+	}
+	respondJSON(w, http.StatusCreated, item)
+}
+
+func applyScheduledSendPreview(item *ScheduledSend, payloadJSON string) {
+	var payload scheduledSendPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		item.Subject = "(no subject)"
+		return
+	}
+	item.Subject = strings.TrimSpace(payload.Subject)
+	if item.Subject == "" {
+		item.Subject = "(no subject)"
+	}
+	item.To = payload.To
+	item.Snippet = snippetFrom(payload.Text, payload.HTML)
+}
+
+func (a *App) handleCancelScheduledSend(w http.ResponseWriter, r *http.Request) {
+	user := currentUser(r)
+	id := strings.TrimSpace(chi.URLParam(r, "id"))
+	var status string
+	if err := a.db.QueryRowContext(r.Context(), `SELECT status FROM scheduled_sends WHERE id=? AND user_id=?`, id, user.ID).Scan(&status); err != nil {
+		respondError(w, http.StatusNotFound, "scheduled send not found")
+		return
+	}
+	if status != "pending" && status != "failed" {
+		badRequest(w, errors.New("scheduled send is not pending"))
+		return
+	}
+	if _, err := a.db.ExecContext(r.Context(), `UPDATE scheduled_sends SET status='cancelled',updated_at=? WHERE id=? AND user_id=?`, a.now().UTC().Format(time.RFC3339Nano), id, user.ID); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to cancel scheduled send")
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (a *App) scheduledSendWorker(ctx context.Context) {
+	a.log.Info("scheduled send worker started")
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		if err := a.processDueScheduledSends(ctx); err != nil {
+			a.log.Warn("scheduled send worker failed", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			a.log.Info("scheduled send worker stopped")
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (a *App) processDueScheduledSends(ctx context.Context) error {
+	rows, err := a.db.QueryContext(ctx, `SELECT id,mailbox_id,draft_id,payload_json FROM scheduled_sends WHERE status='pending' AND send_at<=? ORDER BY send_at LIMIT 20`, a.now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type dueItem struct {
+		id, mailboxID, draftID, payloadJSON string
+	}
+	items := []dueItem{}
+	for rows.Next() {
+		var item dueItem
+		var draftID sql.NullString
+		if err := rows.Scan(&item.id, &item.mailboxID, &draftID, &item.payloadJSON); err != nil {
+			return err
+		}
+		if draftID.Valid {
+			item.draftID = draftID.String
+		}
+		items = append(items, item)
+	}
+	for _, item := range items {
+		a.processScheduledSend(ctx, item.id, item.mailboxID, item.draftID, item.payloadJSON)
+	}
+	return rows.Err()
+}
+
+func (a *App) processScheduledSend(ctx context.Context, id, mailboxID, draftID, payloadJSON string) {
+	now := a.now().UTC().Format(time.RFC3339Nano)
+	res, err := a.db.ExecContext(ctx, `UPDATE scheduled_sends SET status='sending',updated_at=? WHERE id=? AND status='pending'`, now, id)
+	if err != nil {
+		a.log.Warn("failed to claim scheduled send", "id", id, "error", err)
+		return
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return
+	}
+	var payload scheduledSendPayload
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		a.markScheduledSendFailed(ctx, id, "invalid scheduled payload")
+		return
+	}
+	mb, err := a.mailboxByID(ctx, mailboxID)
+	if err != nil || mb.Status != "active" {
+		a.markScheduledSendFailed(ctx, id, "mailbox not found")
+		return
+	}
+	compose := mailComposeInput{MailboxID: payload.MailboxID, To: payload.To, CC: payload.CC, BCC: payload.BCC, Subject: payload.Subject, Text: payload.Text, HTML: payload.HTML, Attachments: payload.Attachments}
+	if _, err := a.sendMailNow(ctx, mb, compose); err != nil {
+		a.markScheduledSendFailed(ctx, id, err.Error())
+		return
+	}
+	if draftID != "" {
+		a.deleteMessageFiles(ctx, draftID)
+		_, _ = a.db.ExecContext(ctx, `DELETE FROM messages WHERE id=?`, draftID)
+	}
+	sentAt := a.now().UTC().Format(time.RFC3339Nano)
+	if _, err := a.db.ExecContext(ctx, `UPDATE scheduled_sends SET status='sent',sent_at=?,updated_at=?,error='' WHERE id=?`, sentAt, sentAt, id); err != nil {
+		a.log.Warn("failed to mark scheduled send sent", "id", id, "error", err)
+	}
+}
+
+func (a *App) markScheduledSendFailed(ctx context.Context, id, message string) {
+	if _, err := a.db.ExecContext(ctx, `UPDATE scheduled_sends SET status='failed',error=?,updated_at=? WHERE id=?`, message, a.now().UTC().Format(time.RFC3339Nano), id); err != nil {
+		a.log.Warn("failed to mark scheduled send failed", "id", id, "error", err)
+	}
 }
 
 func (a *App) isLocalDomainAddress(ctx context.Context, address string) bool {

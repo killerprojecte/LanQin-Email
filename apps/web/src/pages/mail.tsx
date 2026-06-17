@@ -3,8 +3,8 @@ import DOMPurify from "dompurify"
 import { type InfiniteData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useNavigate } from "react-router-dom"
 import type { ImperativePanelHandle } from "react-resizable-panels"
-import { AlignCenter, AlignLeft, AlignRight, Archive, ArrowLeft, Bold, Calendar, Check, ChevronDown, ChevronsUpDown, Code2, Copy, Ellipsis, Eraser, FileText, Forward, Highlighter, Image, Inbox, IndentDecrease, IndentIncrease, Italic, Link, List, ListOrdered, Mail, MailCheck, Moon, PanelLeftClose, PanelLeftOpen, Paperclip, PencilLine, Plus, Quote, Redo2, RefreshCcw, Reply, Search, Send, Settings, Signature, SlidersHorizontal, Smile, Star, Strikethrough, Sun, Tag, Trash2, Type, Underline, Undo2, X } from "lucide-react"
-import { api, Mailbox, MailFolder, MailLabel, MailMessage, SendPayload } from "@/lib/api"
+import { AlignCenter, AlignLeft, AlignRight, Archive, ArrowLeft, Bold, Calendar, Check, ChevronDown, ChevronsUpDown, Clock3, Code2, Copy, Ellipsis, Eraser, FileText, Forward, Highlighter, Image, Inbox, IndentDecrease, IndentIncrease, Italic, Link, List, ListOrdered, Mail, MailCheck, Moon, PanelLeftClose, PanelLeftOpen, Paperclip, PencilLine, Plus, Quote, Redo2, RefreshCcw, Reply, Search, Send, Settings, Signature, SlidersHorizontal, Smile, Star, Strikethrough, Sun, Tag, Trash2, Type, Underline, Undo2, X } from "lucide-react"
+import { api, Mailbox, MailFolder, MailLabel, MailMessage, SendPayload, DraftPayload, ScheduledSend } from "@/lib/api"
 import { cn, formatBytes, formatDate, formatDateTime } from "@/lib/utils"
 import { applyTheme, getInitialTheme } from "@/lib/theme"
 import { useDisplayMode } from "@/lib/display-mode"
@@ -15,6 +15,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Label } from "@/components/ui/label"
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -36,7 +37,7 @@ import {
 import { useMe } from "@/hooks/use-me"
 import { useToast } from "@/hooks/use-toast"
 
-const folderIcons: Record<string, React.ReactNode> = { inbox: <Inbox className="h-4 w-4" />, sent: <Send className="h-4 w-4" />, archive: <Archive className="h-4 w-4" />, trash: <Trash2 className="h-4 w-4" /> }
+const folderIcons: Record<string, React.ReactNode> = { inbox: <Inbox className="h-4 w-4" />, sent: <Send className="h-4 w-4" />, drafts: <FileText className="h-4 w-4" />, archive: <Archive className="h-4 w-4" />, spam: <Trash2 className="h-4 w-4" />, trash: <Trash2 className="h-4 w-4" /> }
 const folderLabels: Record<string, string> = {
   Inbox: "收件箱",
   Sent: "已发送",
@@ -46,14 +47,15 @@ const folderLabels: Record<string, string> = {
   Trash: "回收站",
 }
 
-type ComposeDraft = { key: string; to?: string; cc?: string; bcc?: string; subject?: string; text?: string }
+type ComposeDraft = { key: string; id?: string; mailboxId?: string; to?: string; cc?: string; bcc?: string; subject?: string; text?: string; html?: string; files?: File[]; isDraft?: boolean }
 type MailFilter = "all" | "unread" | "starred" | "attachments"
-type MailView = "folder" | "starred" | "label"
+type MailView = "folder" | "starred" | "label" | "scheduled"
 type MailListResponse = { items?: MailMessage[]; nextCursor?: string }
 type PendingConfirm = { title: string; description?: string; confirmText: string; onConfirm: () => void }
 type MailNotificationState = { latestId: string; latestReceivedAt: string }
 type MailMenuItem =
   | { type: "starred"; key: string; label: string; icon: React.ReactNode; count: number }
+  | { type: "scheduled"; key: string; label: string; icon: React.ReactNode; count: number }
   | { type: "folder"; key: string; folderName: string; label: string; icon: React.ReactNode; count: number }
 
 const filterLabels: Record<MailFilter, string> = {
@@ -86,6 +88,7 @@ export function MailPage() {
   const [lastAutoRefreshAt, setLastAutoRefreshAt] = React.useState<Date | null>(null)
   const [bulkPending, setBulkPending] = React.useState(false)
   const [pendingConfirm, setPendingConfirm] = React.useState<PendingConfirm | null>(null)
+  const [cancelingScheduledId, setCancelingScheduledId] = React.useState("")
   const sidebarPanelRef = React.useRef<ImperativePanelHandle>(null)
   const themeMountedRef = React.useRef(false)
   const mailNotifyStateRef = React.useRef<Record<string, MailNotificationState>>({})
@@ -99,6 +102,7 @@ export function MailPage() {
   const folders = useQuery({ queryKey: ["folders", activeMailboxId], queryFn: () => api.folders(activeMailboxId), enabled: !!activeMailboxId })
   const labels = useQuery({ queryKey: ["labels", activeMailboxId], queryFn: () => api.labels(activeMailboxId), enabled: !!activeMailboxId })
   const mailStats = useQuery({ queryKey: ["mail-stats", activeMailboxId], queryFn: () => api.mailStats(activeMailboxId), enabled: !!activeMailboxId })
+  const scheduledSends = useQuery({ queryKey: ["scheduled-sends", activeMailboxId], queryFn: () => api.scheduledSends(activeMailboxId), enabled: !!activeMailboxId, refetchInterval: 30000 })
   const mailRefreshInterval = publicSettings.data?.mailAutoRefresh ? Math.max(publicSettings.data.mailRefreshMs || 30000, 5000) : false
   const inboxProbe = useQuery({
     queryKey: ["mail-notifications", activeMailboxId],
@@ -117,7 +121,7 @@ export function MailPage() {
     },
     initialPageParam: "",
     getNextPageParam: (lastPage) => lastPage.nextCursor || undefined,
-    enabled: !!activeMailboxId && (mailView !== "label" || !!selectedLabelId),
+    enabled: !!activeMailboxId && mailView !== "scheduled" && (mailView !== "label" || !!selectedLabelId),
   })
   const detail = useQuery({ queryKey: ["message", selectedId], queryFn: () => api.message(selectedId!, { markRead: false }), enabled: !!selectedId })
   function updateCachedMessage(id: string, patch: Partial<MailMessage>) {
@@ -183,6 +187,16 @@ export function MailPage() {
   })
   const del = useMutation({ mutationFn: (id: string) => api.delete(id), onSuccess: async () => { setSelectedId(null); setPendingConfirm(null); await qc.invalidateQueries({ queryKey: ["messages"] }); await qc.invalidateQueries({ queryKey: ["folders"] }); await qc.invalidateQueries({ queryKey: ["mail-stats"] }); await qc.invalidateQueries({ queryKey: ["labels"] }); toast({ title: "已删除" }) }, onError: (error) => toast({ title: "删除失败", description: error.message }) })
   const move = useMutation({ mutationFn: ({ id, folder }: { id: string; folder: string }) => api.move(id, folder), onSuccess: async () => { setSelectedId(null); await qc.invalidateQueries({ queryKey: ["messages"] }); await qc.invalidateQueries({ queryKey: ["folders"] }); await qc.invalidateQueries({ queryKey: ["mail-stats"] }); await qc.invalidateQueries({ queryKey: ["labels"] }); toast({ title: "已移动" }) } })
+  const cancelScheduledSend = useMutation({
+    mutationFn: (item: ScheduledSend) => api.cancelScheduledSend(item.id),
+    onMutate: (item) => setCancelingScheduledId(item.id),
+    onSuccess: async (_, item) => {
+      await qc.invalidateQueries({ queryKey: ["scheduled-sends"] })
+      toast({ title: item.status === "failed" ? "已移除失败记录" : "已取消定时发送" })
+    },
+    onError: (error) => toast({ title: "操作失败", description: error instanceof Error ? error.message : "请稍后重试" }),
+    onSettled: () => setCancelingScheduledId(""),
+  })
   const markAllRead = useMutation({
     mutationFn: async (items: MailMessage[]) => {
       const unread = items.filter((message) => !message.isRead)
@@ -309,6 +323,7 @@ export function MailPage() {
         qc.invalidateQueries({ queryKey: ["folders"] }),
         qc.invalidateQueries({ queryKey: ["mail-stats"] }),
         qc.invalidateQueries({ queryKey: ["labels"] }),
+        qc.invalidateQueries({ queryKey: ["scheduled-sends"] }),
         qc.invalidateQueries({ queryKey: ["mail-notifications"] }),
       ]).finally(() => {
         setLastAutoRefreshAt(new Date())
@@ -328,11 +343,18 @@ export function MailPage() {
   })
   const unreadCount = allMessages.filter((message) => !message.isRead).length
   const starredCount = mailStats.data?.starredMessages ?? (mailView === "starred" ? allMessages.length : 0)
-  const mailMenuItems = buildMailMenuItems(folders.data?.items || [], starredCount)
+  const scheduledItems = scheduledSends.data?.items || []
+  const scheduledDraftIds = new Set(scheduledItems.map((item) => item.draftId).filter((draftId): draftId is string => Boolean(draftId)))
+  const scheduledCount = scheduledItems.length
+  const scheduledQuery = query.trim().toLowerCase()
+  const visibleScheduledItems = scheduledQuery
+    ? scheduledItems.filter((item) => [item.subject, item.snippet, ...(item.to || [])].join(" ").toLowerCase().includes(scheduledQuery))
+    : scheduledItems
+  const mailMenuItems = buildMailMenuItems(folders.data?.items || [], starredCount, scheduledCount)
   const labelItems = labels.data?.items || []
   const selectedLabel = labelItems.find((item) => item.id === selectedLabelId)
-  const viewTitle = mailView === "starred" ? "星标邮件" : mailView === "label" ? selectedLabel?.name || "标签" : folderLabels[folder] || folder
-  const emptyMessage = allMessages.length === 0 ? (mailView === "starred" ? "暂无星标邮件" : mailView === "label" ? "当前标签没有邮件" : "当前文件夹没有邮件") : "当前筛选条件下没有邮件"
+  const viewTitle = mailView === "scheduled" ? "待发送" : mailView === "starred" ? "星标邮件" : mailView === "label" ? selectedLabel?.name || "标签" : folderLabels[folder] || folder
+  const emptyMessage = getEmptyMessage(mailView, folder, allMessages.length)
   const visibleMessageIds = visibleMessages.map((message) => message.id)
   const selectedCountOnPage = compactSelectedIds.filter((id) => visibleMessageIds.includes(id)).length
   const compactAllSelected = visibleMessageIds.length > 0 && selectedCountOnPage === visibleMessageIds.length
@@ -351,6 +373,7 @@ export function MailPage() {
       qc.invalidateQueries({ queryKey: ["folders"] }),
       qc.invalidateQueries({ queryKey: ["mail-stats"] }),
       qc.invalidateQueries({ queryKey: ["labels"] }),
+      qc.invalidateQueries({ queryKey: ["scheduled-sends"] }),
     ])
   }
   async function runBulkAction(action: BulkAction) {
@@ -404,6 +427,32 @@ export function MailPage() {
   function openCompose(draft?: ComposeDraft) { setComposeDraft(draft || { key: `new-${Date.now()}` }); setComposeOpen(true) }
   function openReply(message: MailMessage) { openCompose({ key: `reply-${message.id}-${Date.now()}`, to: message.from, subject: withPrefix(message.subject, "Re:"), text: quoteMessage(message) }) }
   function openForward(message: MailMessage) { openCompose({ key: `forward-${message.id}-${Date.now()}`, subject: withPrefix(message.subject, "Fwd:"), text: quoteMessage(message) }) }
+  async function openDraft(message: MailMessage) {
+    if (scheduledDraftIds.has(message.id)) {
+      toast({ title: "这封草稿已在待发送队列中", description: "请先取消定时发送，再继续编辑。" })
+      openScheduled()
+      return
+    }
+    try {
+      const detail = await api.message(message.id, { markRead: false })
+      openCompose({
+        key: `draft-${detail.id}-${Date.now()}`,
+        id: detail.id,
+        mailboxId: detail.mailboxId,
+        to: detail.to.join(", "),
+        cc: detail.cc.join(", "),
+        bcc: (detail.bcc || []).join(", "),
+        subject: detail.subject === "(无主题)" ? "" : detail.subject,
+        text: detail.bodyText || "",
+        html: detail.bodyHtml || "",
+        files: await attachmentFilesFromMessage(detail),
+        isDraft: true,
+      })
+      setSelectedId(null)
+    } catch (error) {
+      toast({ title: "打开草稿失败", description: error instanceof Error ? error.message : "请稍后重试" })
+    }
+  }
   function switchMailbox(mailboxId: string) {
     setSelectedMailboxId(mailboxId)
     setFolder("Inbox")
@@ -424,6 +473,12 @@ export function MailPage() {
     setSelectedId(null)
     setMailFilter("all")
   }
+  function openScheduled() {
+    setMailView("scheduled")
+    setSelectedLabelId("")
+    setSelectedId(null)
+    setMailFilter("all")
+  }
   function openLabel(labelId: string) {
     setSelectedLabelId(labelId)
     setMailView("label")
@@ -431,9 +486,16 @@ export function MailPage() {
     setMailFilter("all")
   }
   function openMessage(messageId: string | null) {
-    setSelectedId(messageId)
-    if (!messageId) return
+    if (!messageId) {
+      setSelectedId(null)
+      return
+    }
     const message = allMessages.find((item) => item.id === messageId)
+    if (message?.folder === "Drafts") {
+      void openDraft(message)
+      return
+    }
+    setSelectedId(messageId)
     if (message && !message.isRead) {
       markRead.mutate({ id: message.id, read: true })
     }
@@ -506,9 +568,9 @@ export function MailPage() {
                         {mailMenuItems.map((item) => (
                           <SidebarMenuItem key={item.key}>
                             <SidebarMenuButton
-                              isActive={item.type === "starred" ? mailView === "starred" : mailView === "folder" && folder === item.folderName}
+                              isActive={item.type === "starred" ? mailView === "starred" : item.type === "scheduled" ? mailView === "scheduled" : mailView === "folder" && folder === item.folderName}
                               className={cn(sidebarCollapsed && "justify-center px-0")}
-                              onClick={() => item.type === "starred" ? openStarred() : openFolder(item.folderName)}
+                              onClick={() => item.type === "starred" ? openStarred() : item.type === "scheduled" ? openScheduled() : openFolder(item.folderName)}
                             >
                               {item.icon}
                               {!sidebarCollapsed && <span>{item.label}</span>}
@@ -564,28 +626,42 @@ export function MailPage() {
                         {autoRefreshing ? "自动刷新中..." : lastAutoRefreshAt ? `已刷新 ${lastAutoRefreshAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "自动刷新已开启"}
                       </div>
                     )}
-                    <Button variant="outline" size="sm" disabled={!activeMailboxId || markAllRead.isPending || unreadCount === 0} onClick={() => markAllRead.mutate(allMessages)}><MailCheck className="h-4 w-4" />全部已读</Button>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button variant="outline" size="sm"><SlidersHorizontal className="h-4 w-4" />{filterLabels[mailFilter]}</Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="start">
-                        {(Object.keys(filterLabels) as MailFilter[]).map((value) => (
-                          <DropdownMenuItem key={value} onSelect={() => setMailFilter(value)}>
-                            {filterLabels[value]}
-                          </DropdownMenuItem>
-                        ))}
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    {mailView !== "scheduled" && (
+                      <>
+                        <Button variant="outline" size="sm" disabled={!activeMailboxId || markAllRead.isPending || unreadCount === 0} onClick={() => markAllRead.mutate(allMessages)}><MailCheck className="h-4 w-4" />全部已读</Button>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="outline" size="sm"><SlidersHorizontal className="h-4 w-4" />{filterLabels[mailFilter]}</Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="start">
+                            {(Object.keys(filterLabels) as MailFilter[]).map((value) => (
+                              <DropdownMenuItem key={value} onSelect={() => setMailFilter(value)}>
+                                {filterLabels[value]}
+                              </DropdownMenuItem>
+                            ))}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </>
+                    )}
                   </div>
                   <div className="relative w-full max-w-md">
                     <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-                    <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索邮件" className="pl-9" />
+                    <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={mailView === "scheduled" ? "搜索待发送" : "搜索邮件"} className="pl-9" />
                   </div>
                 </header>
 
                 {!mailboxList.isLoading && !hasMailboxes ? (
                   <NoMailboxState onOpenSettings={openSettings} />
+                ) : mailView === "scheduled" ? (
+                  <ScheduledSendView
+                    compact={displayMode === "compact"}
+                    items={visibleScheduledItems}
+                    total={scheduledItems.length}
+                    loading={scheduledSends.isLoading}
+                    query={query}
+                    cancelingId={cancelingScheduledId}
+                    onCancel={(item) => cancelScheduledSend.mutate(item)}
+                  />
                 ) : displayMode === "compact" ? (
                   <CompactMailView
                     title={viewTitle}
@@ -608,6 +684,7 @@ export function MailPage() {
                     onSelect={openMessage}
                     onSelectAll={toggleCompactSelectAll}
                     onToggleSelected={toggleCompactSelect}
+                    scheduledDraftIds={scheduledDraftIds}
                     onCloseReader={() => setSelectedId(null)}
                     onStar={(message) => star.mutate({ id: message.id, starred: !message.isStarred })}
                     onReply={openReply}
@@ -636,7 +713,7 @@ export function MailPage() {
                       </div>
                       <ScrollArea className="min-h-0 flex-1">
                         {messages.isLoading && <MessageSkeleton />}
-                        {visibleMessages.map((m) => <MessageRow key={m.id} message={m} active={selectedId === m.id} checked={compactSelectedIds.includes(m.id)} onCheckedChange={(checked) => toggleCompactSelect(m.id, checked)} onClick={() => openMessage(m.id)} onStar={() => star.mutate({ id: m.id, starred: !m.isStarred })} />)}
+                        {visibleMessages.map((m) => <MessageRow key={m.id} message={m} active={selectedId === m.id} checked={compactSelectedIds.includes(m.id)} scheduled={scheduledDraftIds.has(m.id)} onCheckedChange={(checked) => toggleCompactSelect(m.id, checked)} onClick={() => openMessage(m.id)} onStar={() => star.mutate({ id: m.id, starred: !m.isStarred })} />)}
                         {!messages.isLoading && visibleMessages.length === 0 && <div className="p-8 text-center text-sm text-muted-foreground">{emptyMessage}</div>}
                         {!messages.isLoading && hasMoreMessages && (
                           <div className="border-b p-4 text-center">
@@ -695,7 +772,7 @@ export function MailPage() {
           </ResizablePanelGroup>
       </SidebarProvider>
 
-      <ComposeDialog mailbox={selectedMailbox} open={composeOpen} draft={composeDraft} onOpenChange={(open) => { setComposeOpen(open); if (!open) setComposeDraft(undefined) }} onSent={() => { setComposeOpen(false); setComposeDraft(undefined); qc.invalidateQueries({ queryKey: ["messages"] }); qc.invalidateQueries({ queryKey: ["folders"] }); qc.invalidateQueries({ queryKey: ["mail-stats"] }); qc.invalidateQueries({ queryKey: ["labels"] }) }} />
+      <ComposeDialog mailbox={selectedMailbox} open={composeOpen} draft={composeDraft} onOpenChange={(open) => { setComposeOpen(open); if (!open) setComposeDraft(undefined) }} onSent={() => { setComposeOpen(false); setComposeDraft(undefined); qc.invalidateQueries({ queryKey: ["messages"] }); qc.invalidateQueries({ queryKey: ["folders"] }); qc.invalidateQueries({ queryKey: ["mail-stats"] }); qc.invalidateQueries({ queryKey: ["labels"] }); qc.invalidateQueries({ queryKey: ["scheduled-sends"] }) }} />
       <ConfirmDialog
         open={!!pendingConfirm}
         title={pendingConfirm?.title || ""}
@@ -710,23 +787,42 @@ export function MailPage() {
   )
 }
 
-function buildMailMenuItems(folders: MailFolder[], starredCount: number): MailMenuItem[] {
-  const folderItems: MailMenuItem[] = folders.map((item) => ({
+function buildMailMenuItems(folders: MailFolder[], starredCount: number, scheduledCount: number): MailMenuItem[] {
+  const byName = new Map(folders.map((item) => [item.name, item]))
+  const normalizedFolders = ["Inbox", "Drafts", "Sent", "Archive", "Spam", "Trash"].map((name) => byName.get(name) || { id: `virtual-${name}`, name, role: name.toLowerCase(), unreadCount: 0, totalCount: 0 })
+  for (const item of folders) {
+    if (!normalizedFolders.some((folder) => folder.name === item.name)) normalizedFolders.push(item)
+  }
+  const folderItems: MailMenuItem[] = normalizedFolders.map((item) => ({
     type: "folder",
     key: item.id,
     folderName: item.name,
     label: folderLabels[item.name] || item.name,
     icon: folderIcons[item.role] || <Inbox className="h-4 w-4" />,
-    count: item.unreadCount,
+    count: item.name === "Drafts" ? item.totalCount : item.unreadCount,
   }))
   const starredItem: MailMenuItem = { type: "starred", key: "starred", label: "星标邮件", icon: <Star className="h-4 w-4" />, count: starredCount }
+  const scheduledItem: MailMenuItem = { type: "scheduled", key: "scheduled", label: "待发送", icon: <Clock3 className="h-4 w-4" />, count: scheduledCount }
   const inboxIndex = folderItems.findIndex((item) => item.type === "folder" && item.folderName === "Inbox")
   const insertAt = inboxIndex >= 0 ? inboxIndex + 1 : 0
-  return [...folderItems.slice(0, insertAt), starredItem, ...folderItems.slice(insertAt)]
+  return [...folderItems.slice(0, insertAt), starredItem, scheduledItem, ...folderItems.slice(insertAt)]
 }
 
 function FolderSkeleton() { return <div className="space-y-2 p-2"><Skeleton className="h-8 w-full" /><Skeleton className="h-8 w-4/5" /><Skeleton className="h-8 w-3/4" /></div> }
 function MessageSkeleton() { return <div className="space-y-0">{Array.from({ length: 6 }).map((_, i) => <div className="space-y-2 border-b p-4" key={i}><Skeleton className="h-4 w-1/2" /><Skeleton className="h-4 w-4/5" /><Skeleton className="h-3 w-full" /></div>)}</div> }
+
+function getEmptyMessage(mailView: MailView, folder: string, total: number) {
+  if (mailView === "scheduled") return total === 0 ? "没有待发送邮件" : "当前搜索没有匹配的定时邮件"
+  if (total > 0) return "当前筛选条件下没有邮件"
+  if (mailView === "starred") return "暂无星标邮件"
+  if (mailView === "label") return "当前标签没有邮件"
+  if (folder === "Inbox") return "收件箱暂时为空"
+  if (folder === "Drafts") return "还没有草稿"
+  if (folder === "Sent") return "还没有已发送邮件"
+  if (folder === "Trash") return "回收站是空的"
+  if (folder === "Spam") return "暂无垃圾邮件"
+  return "当前文件夹没有邮件"
+}
 
 function NoMailboxState({ onOpenSettings }: { onOpenSettings: () => void }) {
   return (
@@ -742,6 +838,79 @@ function NoMailboxState({ onOpenSettings }: { onOpenSettings: () => void }) {
         </Button>
       </div>
     </div>
+  )
+}
+
+function ScheduledSendView({ compact, items, total, loading, query, cancelingId, onCancel }: { compact: boolean; items: ScheduledSend[]; total: number; loading: boolean; query: string; cancelingId: string; onCancel: (item: ScheduledSend) => void }) {
+  const empty = query.trim() ? "当前搜索没有匹配的定时邮件" : "没有待发送邮件"
+  return (
+    <div className="flex min-h-0 flex-1 flex-col bg-background">
+      <div className={cn("flex shrink-0 items-center justify-between gap-3 border-b", compact ? "h-12 px-4" : "h-14 px-5")}>
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 text-sm font-semibold"><Clock3 className="h-4 w-4" />待发送</div>
+          <div className="text-xs text-muted-foreground">{items.length} / {total} 封定时邮件</div>
+        </div>
+      </div>
+      <ScrollArea className="min-h-0 flex-1">
+        {loading && <ScheduledSendSkeleton />}
+        {!loading && items.length === 0 && <div className="p-8 text-center text-sm text-muted-foreground">{empty}</div>}
+        {!loading && items.map((item) => (
+          <ScheduledSendRow key={item.id} item={item} compact={compact} pending={cancelingId === item.id} onCancel={() => onCancel(item)} />
+        ))}
+      </ScrollArea>
+    </div>
+  )
+}
+
+function ScheduledSendSkeleton() {
+  return (
+    <div className="space-y-0">
+      {Array.from({ length: 4 }).map((_, index) => (
+        <div className="space-y-3 border-b p-4" key={index}>
+          <Skeleton className="h-4 w-1/2" />
+          <Skeleton className="h-3 w-3/4" />
+          <Skeleton className="h-8 w-32" />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function ScheduledSendRow({ item, compact, pending, onCancel }: { item: ScheduledSend; compact: boolean; pending: boolean; onCancel: () => void }) {
+  const recipients = item.to?.length ? item.to.join(", ") : "未填写收件人"
+  const failed = item.status === "failed"
+  return (
+    <div className={cn("border-b transition-colors hover:bg-accent/40", compact ? "p-4" : "px-5 py-4")}>
+      <div className={cn("gap-4", compact ? "space-y-3" : "grid grid-cols-[minmax(0,1fr)_180px_116px] items-center")}>
+        <div className="min-w-0">
+          <div className="mb-1 flex min-w-0 items-center gap-2">
+            <span className="truncate text-sm font-semibold">{item.subject || "(无主题)"}</span>
+            <ScheduledStatusBadge status={item.status} />
+          </div>
+          <div className="truncate text-xs text-muted-foreground">发给 {recipients}</div>
+          {item.snippet && <div className="mt-1 line-clamp-1 text-xs text-muted-foreground">{item.snippet}</div>}
+          {failed && item.error && <div className="mt-2 text-xs text-destructive">{item.error}</div>}
+        </div>
+        <div className="text-sm">
+          <div className="text-xs text-muted-foreground">发送时间</div>
+          <div className="mt-1 font-medium">{formatDateTime(item.sendAt)}</div>
+        </div>
+        <div className={cn("flex", compact ? "justify-start" : "justify-end")}>
+          <Button type="button" variant={failed ? "outline" : "destructive"} size="sm" disabled={pending || item.status === "sending"} onClick={onCancel}>
+            {pending ? "处理中..." : failed ? "移除记录" : "取消发送"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ScheduledStatusBadge({ status }: { status: ScheduledSend["status"] }) {
+  const label = status === "pending" ? "等待发送" : status === "sending" ? "发送中" : status === "failed" ? "发送失败" : status === "sent" ? "已发送" : "已取消"
+  return (
+    <Badge variant={status === "failed" ? "destructive" : status === "sending" ? "secondary" : "outline"} className="h-5 shrink-0 rounded-md px-1.5 text-[11px] font-normal">
+      {label}
+    </Badge>
   )
 }
 
@@ -789,6 +958,7 @@ function CompactMailView({
   onSelect,
   onSelectAll,
   onToggleSelected,
+  scheduledDraftIds,
   onLoadMore,
   onCloseReader,
   onStar,
@@ -821,6 +991,7 @@ function CompactMailView({
   onSelect: (id: string | null) => void
   onSelectAll: (checked: boolean) => void
   onToggleSelected: (id: string, checked: boolean) => void
+  scheduledDraftIds: Set<string>
   onLoadMore: () => void
   onCloseReader: () => void
   onStar: (message: MailMessage) => void
@@ -881,7 +1052,7 @@ function CompactMailView({
       </div>
       <ScrollArea className="min-h-0 flex-1">
         {loading && <MessageSkeleton />}
-        {messages.map((message) => <CompactMessageRow key={message.id} message={message} active={selectedId === message.id} checked={selectedIds.includes(message.id)} onCheckedChange={(checked) => onToggleSelected(message.id, checked)} onClick={() => onSelect(message.id)} onStar={() => onStar(message)} />)}
+        {messages.map((message) => <CompactMessageRow key={message.id} message={message} active={selectedId === message.id} checked={selectedIds.includes(message.id)} scheduled={scheduledDraftIds.has(message.id)} onCheckedChange={(checked) => onToggleSelected(message.id, checked)} onClick={() => onSelect(message.id)} onStar={() => onStar(message)} />)}
         {!loading && messages.length === 0 && <div className="p-8 text-center text-sm text-muted-foreground">{emptyMessage}</div>}
         {!loading && hasMore && (
           <div className="border-b p-4 text-center">
@@ -935,12 +1106,18 @@ function CompactMessageDetail({
       <div className="flex h-14 shrink-0 items-center justify-between gap-3 border-b px-4">
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="outline" size="sm" onClick={onBack}><ArrowLeft className="h-4 w-4" />返回</Button>
-            {selected && <Button variant="outline" size="sm" onClick={() => onReply(selected)}><Reply className="h-4 w-4" />回复</Button>}
+            {selected?.folder === "Drafts" ? (
+              <Button variant="outline" size="sm" onClick={() => onSelect(selected.id)}><PencilLine className="h-4 w-4" />编辑草稿</Button>
+            ) : (
+              <>
+                {selected && <Button variant="outline" size="sm" onClick={() => onReply(selected)}><Reply className="h-4 w-4" />回复</Button>}
+                {selected && <Button variant="outline" size="sm" onClick={() => onForward(selected)}><Forward className="h-4 w-4" />转发</Button>}
+                {selected && <Button variant="outline" size="sm" onClick={() => onArchive(selected)}>{selected.folder === "Archive" ? "取消归档" : "归档"}</Button>}
+                {selected && <Button variant="outline" size="sm" onClick={() => onToggleRead(selected)}><MailCheck className="h-4 w-4" />{selected.isRead ? "标为未读" : "标为已读"}</Button>}
+                {selected && <Button variant="outline" size="sm" onClick={() => onStar(selected)}><Star className={cn("h-4 w-4", selected.isStarred && "fill-yellow-400 text-yellow-500")} />{selected.isStarred ? "取消星标" : "添加星标"}</Button>}
+              </>
+            )}
             {selected && <Button variant="outline" size="sm" onClick={() => onDelete(selected)}><Trash2 className="h-4 w-4" />删除</Button>}
-            {selected && <Button variant="outline" size="sm" onClick={() => onForward(selected)}><Forward className="h-4 w-4" />转发</Button>}
-            {selected && <Button variant="outline" size="sm" onClick={() => onArchive(selected)}>{selected.folder === "Archive" ? "取消归档" : "归档"}</Button>}
-            {selected && <Button variant="outline" size="sm" onClick={() => onToggleRead(selected)}><MailCheck className="h-4 w-4" />{selected.isRead ? "标为未读" : "标为已读"}</Button>}
-            {selected && <Button variant="outline" size="sm" onClick={() => onStar(selected)}><Star className={cn("h-4 w-4", selected.isStarred && "fill-yellow-400 text-yellow-500")} />{selected.isStarred ? "取消星标" : "添加星标"}</Button>}
           </div>
           <div className="flex items-center gap-2">
             <Button variant="ghost" size="sm" disabled={!previousMessage} onClick={() => previousMessage && onSelect(previousMessage.id)}>上一封</Button>
@@ -988,7 +1165,7 @@ function CompactMessageDetail({
   )
 }
 
-function CompactMessageRow({ message, active, checked, onCheckedChange, onClick, onStar }: { message: MailMessage; active: boolean; checked: boolean; onCheckedChange: (checked: boolean) => void; onClick: () => void; onStar: () => void }) {
+function CompactMessageRow({ message, active, checked, scheduled, onCheckedChange, onClick, onStar }: { message: MailMessage; active: boolean; checked: boolean; scheduled?: boolean; onCheckedChange: (checked: boolean) => void; onClick: () => void; onStar: () => void }) {
   const visibleLabels = (message.labels || []).slice(0, 2)
   const senderName = senderDisplayName(message)
   return (
@@ -999,6 +1176,7 @@ function CompactMessageRow({ message, active, checked, onCheckedChange, onClick,
       <div className="flex min-w-0 items-center gap-2">
         <span className="truncate font-medium">{message.subject}</span>
         <span className="min-w-0 truncate text-muted-foreground">{message.snippet}</span>
+        {scheduled && <Badge variant="secondary" className="h-5 shrink-0 rounded-md px-1.5 text-[11px] font-normal">已定时</Badge>}
         {visibleLabels.map((label) => <MailLabelBadge key={label.id} label={label} compact />)}
         {message.hasAttachments && <Paperclip className="h-3 w-3 shrink-0 text-muted-foreground" />}
       </div>
@@ -1142,6 +1320,7 @@ function MessageRow({
   message,
   active,
   checked,
+  scheduled,
   onCheckedChange,
   onClick,
   onStar,
@@ -1149,6 +1328,7 @@ function MessageRow({
   message: MailMessage
   active: boolean
   checked: boolean
+  scheduled?: boolean
   onCheckedChange: (checked: boolean) => void
   onClick: () => void
   onStar: () => void
@@ -1184,6 +1364,7 @@ function MessageRow({
         </div>
         <div className="mb-1 flex min-w-0 items-center gap-2">
           <span className="min-w-0 truncate text-sm">{message.subject}</span>
+          {scheduled && <Badge variant="secondary" className="h-5 shrink-0 rounded-md px-1.5 text-[11px] font-normal">已定时</Badge>}
           {visibleLabels.map((label) => <MailLabelBadge key={label.id} label={label} compact />)}
           {hiddenLabelCount > 0 && <Badge variant="outline" className="h-5 shrink-0 rounded-md px-1.5 text-[11px] font-normal text-muted-foreground">+{hiddenLabelCount}</Badge>}
           {message.hasAttachments && <Paperclip className="h-3 w-3 shrink-0 text-muted-foreground" />}
@@ -1251,35 +1432,139 @@ function MessageLabels({ messageLabels, availableLabels, onAdd, onRemove, pendin
 
 function ComposeDialog({ mailbox, open, draft, onOpenChange, onSent }: { mailbox?: Mailbox; open: boolean; draft?: ComposeDraft; onOpenChange: (v: boolean) => void; onSent: () => void }) {
   const { toast } = useToast()
+  const qc = useQueryClient()
   const [files, setFiles] = React.useState<File[]>([])
+  const [draftAttachments, setDraftAttachments] = React.useState<SendPayload["attachments"]>([])
+  const [attachmentsTouched, setAttachmentsTouched] = React.useState(false)
+  const [draftId, setDraftId] = React.useState(draft?.id || "")
+  const [toValue, setToValue] = React.useState(draft?.to || "")
+  const [ccValue, setCcValue] = React.useState(draft?.cc || "")
+  const [bccValue, setBccValue] = React.useState(draft?.bcc || "")
+  const [subjectValue, setSubjectValue] = React.useState(draft?.subject || "")
+  const [draftStatus, setDraftStatus] = React.useState<"idle" | "saving" | "saved" | "error">("idle")
+  const [lastSavedAt, setLastSavedAt] = React.useState<Date | null>(null)
+  const [scheduleDialogOpen, setScheduleDialogOpen] = React.useState(false)
+  const sendStartedRef = React.useRef(false)
+  const lastSavedPayloadRef = React.useRef("")
   const [showCc, setShowCc] = React.useState(Boolean(draft?.cc))
   const [showBcc, setShowBcc] = React.useState(Boolean(draft?.bcc))
   const [sendSeparately, setSendSeparately] = React.useState(false)
   const defaultSignature = useQuery({ queryKey: ["signature", "default", mailbox?.id], queryFn: () => api.defaultSignature(mailbox?.id), enabled: open && !!mailbox?.id })
   const signatureText = defaultSignature.data?.signature?.content || ""
-  const composerText = draft?.text !== undefined ? draft.text : signatureText ? `\n\n-- \n${signatureText}` : ""
-  const [body, setBody] = React.useState<ComposerValue>(() => plainTextComposerValue(composerText))
+  const composerText = draft?.html || (draft?.text !== undefined ? draft.text : signatureText ? `\n\n-- \n${signatureText}` : "")
+  const [body, setBody] = React.useState<ComposerValue>(() => draft?.html !== undefined ? htmlComposerValue(draft.html) : plainTextComposerValue(composerText))
+  const activeMailboxId = draft?.mailboxId || mailbox?.id || ""
+  const composePayload = React.useMemo<DraftPayload>(() => ({
+    mailboxId: activeMailboxId,
+    to: splitEmails(toValue),
+    cc: showCc ? splitEmails(ccValue) : [],
+    bcc: showBcc ? splitEmails(bccValue) : [],
+    subject: subjectValue,
+    text: body.text,
+    html: body.html || plainTextToHtml(body.text),
+    ...(attachmentsTouched ? { attachments: draftAttachments } : {}),
+  }), [activeMailboxId, toValue, showCc, ccValue, showBcc, bccValue, subjectValue, body, attachmentsTouched, draftAttachments])
+  const hasDraftContent = open && !!activeMailboxId && (toValue.trim() || ccValue.trim() || bccValue.trim() || subjectValue.trim() || body.text.trim() || body.html.trim())
   const send = useMutation({
     mutationFn: async (payloads: SendPayload[]) => {
       const sent: MailMessage[] = []
       for (const payload of payloads) sent.push(await api.send(payload))
       return sent
     },
-    onSuccess: (_, payloads) => {
+    onSuccess: async (_, payloads) => {
+      if (draftId) {
+        try {
+          await api.deleteDraft(draftId)
+        } catch {}
+      }
       toast({ title: payloads.length > 1 ? `已分别发送 ${payloads.length} 封邮件` : "发送成功" })
       setFiles([])
+      setDraftId("")
       onSent()
     },
     onError: (e) => toast({ title: "发送失败", description: e.message }),
   })
+  const scheduleSend = useMutation({
+    mutationFn: (payload: SendPayload & { draftId?: string; sendAt: string }) => api.scheduleSend(payload),
+    onSuccess: (scheduled) => {
+      sendStartedRef.current = true
+      toast({ title: `已定时发送 ${formatDateTime(scheduled.sendAt)}` })
+      setScheduleDialogOpen(false)
+      setFiles([])
+      void Promise.all([
+        qc.invalidateQueries({ queryKey: ["messages"] }),
+        qc.invalidateQueries({ queryKey: ["folders"] }),
+        qc.invalidateQueries({ queryKey: ["mail-stats"] }),
+        qc.invalidateQueries({ queryKey: ["scheduled-sends"] }),
+      ])
+      onSent()
+    },
+    onError: (e) => toast({ title: "定时发送失败", description: e.message }),
+  })
 
   React.useEffect(() => {
     if (!open) return
-    setShowCc(Boolean(draft?.cc))
-    setShowBcc(Boolean(draft?.bcc))
+    sendStartedRef.current = false
+    const nextShowCc = Boolean(draft?.cc)
+    const nextShowBcc = Boolean(draft?.bcc)
+    const nextBody = draft?.html !== undefined ? htmlComposerValue(draft.html) : plainTextComposerValue(composerText)
+    lastSavedPayloadRef.current = JSON.stringify({
+      mailboxId: draft?.mailboxId || mailbox?.id || "",
+      to: splitEmails(draft?.to || ""),
+      cc: nextShowCc ? splitEmails(draft?.cc || "") : [],
+      bcc: nextShowBcc ? splitEmails(draft?.bcc || "") : [],
+      subject: draft?.subject || "",
+      text: nextBody.text,
+      html: nextBody.html || plainTextToHtml(nextBody.text),
+      draftId: draft?.id || "",
+    })
+    setDraftId(draft?.id || "")
+    setToValue(draft?.to || "")
+    setCcValue(draft?.cc || "")
+    setBccValue(draft?.bcc || "")
+    setSubjectValue(draft?.subject || "")
+    setBody(nextBody)
+    setDraftStatus("idle")
+    setLastSavedAt(null)
+    setShowCc(nextShowCc)
+    setShowBcc(nextShowBcc)
     setSendSeparately(false)
-    setFiles([])
-  }, [open, draft?.key, draft?.cc, draft?.bcc])
+    setFiles(draft?.files || [])
+    setDraftAttachments([])
+    setAttachmentsTouched(false)
+  }, [open, draft?.key, draft?.id, draft?.mailboxId, draft?.to, draft?.cc, draft?.bcc, draft?.subject, draft?.html, draft?.files, mailbox?.id, composerText])
+
+  React.useEffect(() => {
+    let cancelled = false
+    Promise.all(files.map(fileToAttachment)).then((attachments) => {
+      if (!cancelled) setDraftAttachments(attachments)
+    })
+    return () => { cancelled = true }
+  }, [files])
+
+  React.useEffect(() => {
+    if (!open || sendStartedRef.current || !hasDraftContent) return
+    const payloadKey = JSON.stringify({ ...composePayload, draftId })
+    if (payloadKey === lastSavedPayloadRef.current) return
+    const timer = window.setTimeout(async () => {
+      try {
+        setDraftStatus("saving")
+        const saved = await api.saveDraft(composePayload, draftId || undefined)
+        setDraftId(saved.id)
+        lastSavedPayloadRef.current = JSON.stringify({ ...composePayload, draftId: saved.id })
+        setLastSavedAt(new Date())
+        setDraftStatus("saved")
+        await Promise.all([
+          qc.invalidateQueries({ queryKey: ["messages"] }),
+          qc.invalidateQueries({ queryKey: ["folders"] }),
+          qc.invalidateQueries({ queryKey: ["mail-stats"] }),
+        ])
+      } catch {
+        setDraftStatus("error")
+      }
+    }, 5000)
+    return () => window.clearTimeout(timer)
+  }, [open, hasDraftContent, composePayload, draftId, qc])
 
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -1287,26 +1572,51 @@ function ComposeDialog({ mailbox, open, draft, onOpenChange, onSent }: { mailbox
       toast({ title: "请选择发件邮箱" })
       return
     }
-    const form = new FormData(e.currentTarget)
+    sendStartedRef.current = true
     const attachments = await Promise.all(files.map(fileToAttachment))
-    const to = splitEmails(String(form.get("to") || ""))
-    const cc = showCc ? splitEmails(String(form.get("cc") || "")) : []
-    const bcc = showBcc ? splitEmails(String(form.get("bcc") || "")) : []
+    const to = splitEmails(toValue)
+    const cc = showCc ? splitEmails(ccValue) : []
+    const bcc = showBcc ? splitEmails(bccValue) : []
     const text = body.text
     const html = body.html || plainTextToHtml(text)
-    const payload: SendPayload = { mailboxId: mailbox.id, to, cc, bcc, subject: String(form.get("subject") || ""), text, html, attachments }
+    const payload: SendPayload = { mailboxId: mailbox.id, to, cc, bcc, subject: subjectValue, text, html, attachments }
     const separateRecipients = Array.from(new Set([...to, ...cc, ...bcc]))
     const payloads = sendSeparately && separateRecipients.length > 0
       ? separateRecipients.map((recipient): SendPayload => ({ ...payload, to: [recipient], cc: [], bcc: [] }))
       : [payload]
     send.mutate(payloads)
   }
+  async function scheduleAt(sendAt: string) {
+    if (!mailbox) {
+      toast({ title: "请选择发件邮箱" })
+      return
+    }
+    const attachments = await Promise.all(files.map(fileToAttachment))
+    const payload: SendPayload & { draftId?: string; sendAt: string } = {
+      mailboxId: mailbox.id,
+      to: splitEmails(toValue),
+      cc: showCc ? splitEmails(ccValue) : [],
+      bcc: showBcc ? splitEmails(bccValue) : [],
+      subject: subjectValue,
+      text: body.text,
+      html: body.html || plainTextToHtml(body.text),
+      attachments,
+      draftId: draftId || undefined,
+      sendAt,
+    }
+    scheduleSend.mutate(payload)
+  }
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="w-[min(96vw,82rem)] max-w-none overflow-hidden p-0">
         <form key={draft?.key || "new"} className="flex max-h-[90vh] flex-col" onSubmit={submit}>
           <DialogHeader className="border-b px-6 py-4 text-left">
-            <DialogTitle>写信</DialogTitle>
+            <DialogTitle className="flex items-center justify-between gap-4">
+              <span>{draftId ? "编辑草稿" : "写信"}</span>
+              <span className={cn("text-xs font-normal", draftStatus === "error" ? "text-destructive" : "text-muted-foreground")}>
+                {draftStatus === "saving" ? "正在保存草稿..." : draftStatus === "saved" && lastSavedAt ? `草稿已保存 ${lastSavedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : draftStatus === "error" ? "草稿保存失败" : ""}
+              </span>
+            </DialogTitle>
           </DialogHeader>
           <div className="flex-1 overflow-y-auto">
             <ComposeField label="发件邮箱">
@@ -1325,35 +1635,38 @@ function ComposeDialog({ mailbox, open, draft, onOpenChange, onSent }: { mailbox
                 </div>
               }
             >
-              <Input name="to" placeholder="name@example.com，多个地址用逗号或空格分隔" defaultValue={draft?.to || ""} required className="h-10 flex-1 rounded-none border-0 px-0 shadow-none focus-visible:ring-0" />
+              <Input name="to" placeholder="name@example.com，多个地址用逗号或空格分隔" value={toValue} onChange={(event) => setToValue(event.target.value)} required className="h-10 flex-1 rounded-none border-0 px-0 shadow-none focus-visible:ring-0" />
             </ComposeField>
             {showCc && (
               <ComposeField label="抄送">
-                <Input name="cc" placeholder="cc@example.com" defaultValue={draft?.cc || ""} className="h-10 flex-1 rounded-none border-0 px-0 shadow-none focus-visible:ring-0" />
+                <Input name="cc" placeholder="cc@example.com" value={ccValue} onChange={(event) => setCcValue(event.target.value)} className="h-10 flex-1 rounded-none border-0 px-0 shadow-none focus-visible:ring-0" />
               </ComposeField>
             )}
             {showBcc && (
               <ComposeField label="密送">
-                <Input name="bcc" placeholder="bcc@example.com" defaultValue={draft?.bcc || ""} className="h-10 flex-1 rounded-none border-0 px-0 shadow-none focus-visible:ring-0" />
+                <Input name="bcc" placeholder="bcc@example.com" value={bccValue} onChange={(event) => setBccValue(event.target.value)} className="h-10 flex-1 rounded-none border-0 px-0 shadow-none focus-visible:ring-0" />
               </ComposeField>
             )}
             <ComposeField label="主　题">
-              <Input name="subject" placeholder="输入主题" defaultValue={draft?.subject || ""} className="h-10 flex-1 rounded-none border-0 px-0 shadow-none focus-visible:ring-0" />
+              <Input name="subject" placeholder="输入主题" value={subjectValue} onChange={(event) => setSubjectValue(event.target.value)} className="h-10 flex-1 rounded-none border-0 px-0 shadow-none focus-visible:ring-0" />
             </ComposeField>
             <MailBodyComposer
               defaultValue={composerText}
+              defaultHtml={draft?.html}
               files={files}
               signatureText={signatureText}
               onChange={setBody}
-              onPickFiles={(nextFiles) => setFiles((current) => [...current, ...nextFiles])}
-              onRemoveFile={(index) => setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index))}
+              onPickFiles={(nextFiles) => { setAttachmentsTouched(true); setFiles((current) => [...current, ...nextFiles]) }}
+              onRemoveFile={(index) => { setAttachmentsTouched(true); setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index)) }}
             />
           </div>
           <DialogFooter className="border-t bg-background px-6 py-4">
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+            <Button type="button" variant="outline" disabled={send.isPending || scheduleSend.isPending || !mailbox} onClick={() => setScheduleDialogOpen(true)}><Calendar className="h-4 w-4" />定时发送</Button>
             <Button disabled={send.isPending || !mailbox}><Send className="h-4 w-4" />{send.isPending ? "发送中..." : "发送"}</Button>
           </DialogFooter>
         </form>
+        <ScheduleSendDialog open={scheduleDialogOpen} pending={scheduleSend.isPending} onOpenChange={setScheduleDialogOpen} onConfirm={scheduleAt} />
       </DialogContent>
     </Dialog>
   )
@@ -1371,19 +1684,187 @@ function ComposeField({ label, children, action }: { label: string; children: Re
   )
 }
 
-type ComposerValue = { text: string; html: string }
+function ScheduleSendDialog({ open, pending, onOpenChange, onConfirm }: { open: boolean; pending: boolean; onOpenChange: (open: boolean) => void; onConfirm: (sendAt: string) => void }) {
+  const [value, setValue] = React.useState("")
+  const { toast } = useToast()
+  const presets = React.useMemo(() => scheduledSendPresets(), [open])
 
-function MailBodyComposer({ defaultValue, files, signatureText, onChange, onPickFiles, onRemoveFile }: { defaultValue: string; files: File[]; signatureText: string; onChange: (value: ComposerValue) => void; onPickFiles: (files: File[]) => void; onRemoveFile: (index: number) => void }) {
+  React.useEffect(() => {
+    if (open) setValue(defaultScheduledSendValue())
+  }, [open])
+
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const date = new Date(value)
+    if (!value || Number.isNaN(date.getTime()) || !date.getTime()) {
+      toast({ title: "请选择发送时间" })
+      return
+    }
+    if (date.getTime() <= Date.now() + 30_000) {
+      toast({ title: "发送时间需要晚于当前时间" })
+      return
+    }
+    onConfirm(date.toISOString())
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <form className="grid gap-4" onSubmit={submit}>
+          <DialogHeader>
+            <DialogTitle>定时发送</DialogTitle>
+          </DialogHeader>
+          <div className="grid grid-cols-2 gap-2">
+            {presets.map((preset) => (
+              <Button
+                type="button"
+                key={preset.label}
+                variant={value === preset.value ? "secondary" : "outline"}
+                className="justify-start font-normal"
+                onClick={() => setValue(preset.value)}
+              >
+                <Clock3 className="h-4 w-4" />{preset.label}
+              </Button>
+            ))}
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="schedule-send-at">发送时间</Label>
+            <Input id="schedule-send-at" type="datetime-local" value={value} min={toDateTimeLocalValue(new Date(Date.now() + 60_000))} onChange={(event) => setValue(event.target.value)} />
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={pending}>取消</Button>
+            <Button type="submit" disabled={pending}>{pending ? "正在设置..." : "确认定时"}</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+type ComposerValue = { text: string; html: string }
+type InsertDialogState = { kind: "link" | "image"; selectedText: string }
+type InsertDialogValue = { url: string; text: string; alt: string }
+type EditorToolbarState = {
+  bold: boolean
+  italic: boolean
+  underline: boolean
+  strikeThrough: boolean
+  unorderedList: boolean
+  orderedList: boolean
+  justifyLeft: boolean
+  justifyCenter: boolean
+  justifyRight: boolean
+  fontName: string
+  fontSize: string
+}
+
+const defaultToolbarState: EditorToolbarState = {
+  bold: false,
+  italic: false,
+  underline: false,
+  strikeThrough: false,
+  unorderedList: false,
+  orderedList: false,
+  justifyLeft: false,
+  justifyCenter: false,
+  justifyRight: false,
+  fontName: "",
+  fontSize: "3",
+}
+const composerFontOptions = ["Arial", "Georgia", "Times New Roman", "Courier New", "Microsoft YaHei"]
+const composerFontSizeOptions = [
+  ["2", "小号"],
+  ["3", "正文"],
+  ["4", "中号"],
+  ["5", "大号"],
+] as const
+const composerEmojiOptions = ["😀", "😄", "😊", "🙂", "😉", "😍", "😘", "😎", "🤔", "👍", "👏", "🙏", "💪", "🎉", "🔥", "✨", "❤️", "✅", "📌", "📅", "☕", "💡", "🚀", "⭐"]
+
+function queryCommandState(command: string) {
+  try {
+    return document.queryCommandState(command)
+  } catch {
+    return false
+  }
+}
+
+function queryCommandValue(command: string) {
+  try {
+    return String(document.queryCommandValue(command) || "")
+  } catch {
+    return ""
+  }
+}
+
+function normalizeFontName(value: string) {
+  const cleaned = value.replace(/["']/g, "").split(",")[0]?.trim() || ""
+  if (!cleaned || cleaned === "默认字体") return ""
+  if (/microsoft yahei/i.test(cleaned) || cleaned.includes("微软雅黑")) return "Microsoft YaHei"
+  const lower = cleaned.toLowerCase()
+  return composerFontOptions.find((font) => {
+    const option = font.toLowerCase()
+    return lower === option || lower.includes(option) || option.includes(lower)
+  }) || ""
+}
+
+function normalizeFontSize(value: string) {
+  const cleaned = value.trim().toLowerCase()
+  if (!cleaned) return ""
+  if (composerFontSizeOptions.some(([size]) => size === cleaned)) return cleaned
+  const px = Number(cleaned.replace("px", ""))
+  if (Number.isFinite(px)) {
+    if (px <= 13) return "2"
+    if (px <= 17) return "3"
+    if (px <= 22) return "4"
+    return "5"
+  }
+  if (cleaned.includes("small")) return "2"
+  if (cleaned.includes("large") || cleaned.includes("x-large")) return "5"
+  if (cleaned.includes("medium") || cleaned.includes("normal")) return "3"
+  return ""
+}
+
+function fontLabel(value: string) {
+  const normalized = normalizeFontName(value)
+  if (!normalized) return "默认字体"
+  return normalized === "Microsoft YaHei" ? "微软雅黑" : normalized
+}
+
+function fontSizeLabel(value: string) {
+  const normalized = normalizeFontSize(value) || "3"
+  return composerFontSizeOptions.find(([size]) => size === normalized)?.[1] || "正文"
+}
+
+function selectionElementInside(root: HTMLElement | null) {
+  const selection = window.getSelection()
+  const node = selection?.anchorNode
+  if (!root || !node || !root.contains(node)) return null
+  return node instanceof HTMLElement ? node : node.parentElement
+}
+
+function normalizeInsertUrl(value: string, kind: InsertDialogState["kind"]) {
+  const trimmed = value.trim()
+  if (!trimmed) return ""
+  const allowed = kind === "image" ? /^(https?:|cid:|data:image\/|\/)/i : /^(https?:|mailto:|tel:|#|\/)/i
+  return allowed.test(trimmed) ? trimmed : `https://${trimmed}`
+}
+
+function MailBodyComposer({ defaultValue, defaultHtml, files, signatureText, onChange, onPickFiles, onRemoveFile }: { defaultValue: string; defaultHtml?: string; files: File[]; signatureText: string; onChange: (value: ComposerValue) => void; onPickFiles: (files: File[]) => void; onRemoveFile: (index: number) => void }) {
   const editorRef = React.useRef<HTMLDivElement>(null)
   const fileInputRef = React.useRef<HTMLInputElement>(null)
-  const initialHtmlRef = React.useRef(plainTextToHtml(defaultValue))
+  const selectionRef = React.useRef<Range | null>(null)
+  const initialHtmlRef = React.useRef(defaultHtml !== undefined ? DOMPurify.sanitize(defaultHtml) : plainTextToHtml(defaultValue))
   const dirtyRef = React.useRef(false)
   const lastDefaultRef = React.useRef(defaultValue)
   const [formatOpen, setFormatOpen] = React.useState(true)
+  const [scheduleOpen, setScheduleOpen] = React.useState(false)
+  const [emojiOpen, setEmojiOpen] = React.useState(false)
+  const [insertDialog, setInsertDialog] = React.useState<InsertDialogState | null>(null)
+  const [toolbarState, setToolbarState] = React.useState<EditorToolbarState>(defaultToolbarState)
   const [empty, setEmpty] = React.useState(!defaultValue.trim())
 
   React.useEffect(() => {
-    const next = plainTextComposerValue(defaultValue)
+    const next = defaultHtml !== undefined ? htmlComposerValue(defaultHtml) : plainTextComposerValue(defaultValue)
     onChange(next)
     setEmpty(!next.text.trim())
   }, [])
@@ -1392,15 +1873,45 @@ function MailBodyComposer({ defaultValue, files, signatureText, onChange, onPick
     if (defaultValue === lastDefaultRef.current) return
     lastDefaultRef.current = defaultValue
     if (!dirtyRef.current) {
-      const next = plainTextComposerValue(defaultValue)
+      const next = defaultHtml !== undefined ? htmlComposerValue(defaultHtml) : plainTextComposerValue(defaultValue)
       if (editorRef.current) editorRef.current.innerHTML = next.html
       setEmpty(!next.text.trim())
       onChange(next)
     }
-  }, [defaultValue, onChange])
+  }, [defaultValue, defaultHtml, onChange])
+
+  React.useEffect(() => {
+    function handleSelectionChange() {
+      const selection = window.getSelection()
+      const anchorNode = selection?.anchorNode
+      if (!anchorNode || !editorRef.current?.contains(anchorNode)) return
+      saveSelection()
+      updateToolbarState()
+    }
+    document.addEventListener("selectionchange", handleSelectionChange)
+    return () => document.removeEventListener("selectionchange", handleSelectionChange)
+  }, [])
 
   function focusEditor() {
     window.requestAnimationFrame(() => editorRef.current?.focus())
+  }
+
+  function saveSelection() {
+    const selection = window.getSelection()
+    const anchorNode = selection?.anchorNode
+    if (!selection || selection.rangeCount === 0 || !anchorNode || !editorRef.current?.contains(anchorNode)) return
+    selectionRef.current = selection.getRangeAt(0).cloneRange()
+  }
+
+  function restoreSelection() {
+    if (!selectionRef.current) return
+    try {
+      const selection = window.getSelection()
+      selection?.removeAllRanges()
+      selection?.addRange(selectionRef.current)
+    } catch {
+      selectionRef.current = null
+    }
   }
 
   function syncEditor() {
@@ -1412,26 +1923,73 @@ function MailBodyComposer({ defaultValue, files, signatureText, onChange, onPick
   function runCommand(command: string, value?: string) {
     dirtyRef.current = true
     editorRef.current?.focus()
+    restoreSelection()
     document.execCommand(command, false, value)
+    saveSelection()
     syncEditor()
+    updateToolbarState()
   }
 
-  function insertLink() {
-    const url = window.prompt("链接地址")
+  function updateToolbarState() {
+    const currentElement = selectionElementInside(editorRef.current)
+    const computedStyle = currentElement ? window.getComputedStyle(currentElement) : null
+    setToolbarState((current) => ({
+      ...current,
+      bold: queryCommandState("bold"),
+      italic: queryCommandState("italic"),
+      underline: queryCommandState("underline"),
+      strikeThrough: queryCommandState("strikeThrough"),
+      unorderedList: queryCommandState("insertUnorderedList"),
+      orderedList: queryCommandState("insertOrderedList"),
+      justifyLeft: queryCommandState("justifyLeft"),
+      justifyCenter: queryCommandState("justifyCenter"),
+      justifyRight: queryCommandState("justifyRight"),
+      fontName: normalizeFontName(queryCommandValue("fontName")) || normalizeFontName(computedStyle?.fontFamily || "") || current.fontName,
+      fontSize: normalizeFontSize(queryCommandValue("fontSize")) || normalizeFontSize(computedStyle?.fontSize || "") || current.fontSize,
+    }))
+  }
+
+  function applyFont(font: string) {
+    runCommand("fontName", font)
+    setToolbarState((current) => ({ ...current, fontName: font }))
+  }
+
+  function applyFontSize(size: string) {
+    runCommand("fontSize", size)
+    setToolbarState((current) => ({ ...current, fontSize: size }))
+  }
+
+  function openInsertDialog(kind: InsertDialogState["kind"]) {
+    saveSelection()
+    setInsertDialog({ kind, selectedText: selectionRef.current?.toString().trim() || "" })
+  }
+
+  function confirmInsert(value: InsertDialogValue) {
+    if (!insertDialog) return
+    const url = normalizeInsertUrl(value.url, insertDialog.kind)
     if (!url) return
-    const selected = window.getSelection()?.toString()
-    if (selected) runCommand("createLink", url)
-    else runCommand("insertHTML", `<a href="${escapeHtml(url)}">${escapeHtml(url)}</a>`)
-  }
-
-  function insertImage() {
-    const url = window.prompt("图片链接")
-    if (url) runCommand("insertImage", url)
+    if (insertDialog.kind === "link") {
+      const text = value.text.trim() || insertDialog.selectedText || value.url.trim()
+      runCommand("insertHTML", `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(text)}</a>`)
+      return
+    }
+    runCommand("insertHTML", `<img src="${escapeHtml(url)}" alt="${escapeHtml(value.alt.trim())}" />`)
   }
 
   function insertSignature() {
     if (!signatureText.trim()) return
     runCommand("insertHTML", `<br><br>-- <br>${plainTextToHtmlFragment(signatureText)}`)
+  }
+
+  function insertSchedule(schedule: ScheduleDraft) {
+    const normalized = normalizeSchedule(schedule)
+    runCommand("insertHTML", scheduleToHtml(normalized))
+    onPickFiles([scheduleToFile(normalized)])
+  }
+
+  function insertEmoji(emoji: string) {
+    runCommand("insertText", emoji)
+    setEmojiOpen(false)
   }
 
   function handlePickedFiles(event: React.ChangeEvent<HTMLInputElement>) {
@@ -1443,11 +2001,11 @@ function MailBodyComposer({ defaultValue, files, signatureText, onChange, onPick
   return (
     <div className="min-h-[420px]">
       <Input ref={fileInputRef} type="file" multiple className="hidden" onChange={handlePickedFiles} />
-      <div className="flex min-h-11 flex-wrap items-center gap-1 border-b px-6 py-2">
+      <div className="flex min-h-11 flex-wrap items-center gap-1 border-b px-6 py-2" onPointerDownCapture={saveSelection}>
         <ToolbarButton label="撤销" onClick={() => runCommand("undo")}><Undo2 className="h-4 w-4" /></ToolbarButton>
         <ToolbarButton label="重做" onClick={() => runCommand("redo")}><Redo2 className="h-4 w-4" /></ToolbarButton>
         <Separator orientation="vertical" className="mx-2 h-6" />
-        <ToolbarTextButton label="图片" icon={<Image className="h-4 w-4" />} onClick={insertImage} />
+        <ToolbarTextButton label="图片" icon={<Image className="h-4 w-4" />} onClick={() => openInsertDialog("image")} />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button type="button" variant="ghost" size="sm" className="h-8 gap-1 rounded-md px-2 font-normal">
@@ -1456,14 +2014,29 @@ function MailBodyComposer({ defaultValue, files, signatureText, onChange, onPick
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start">
             <DropdownMenuItem onSelect={() => fileInputRef.current?.click()}><Paperclip className="h-4 w-4" />附件</DropdownMenuItem>
-            <DropdownMenuItem onSelect={insertLink}><Link className="h-4 w-4" />链接</DropdownMenuItem>
-            <DropdownMenuItem onSelect={insertImage}><Image className="h-4 w-4" />图片链接</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => openInsertDialog("link")}><Link className="h-4 w-4" />链接</DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => openInsertDialog("image")}><Image className="h-4 w-4" />图片链接</DropdownMenuItem>
             <DropdownMenuItem onSelect={() => runCommand("insertHorizontalRule")}><span className="h-4 w-4 border-t border-current" aria-hidden />分隔线</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
         <ToolbarTextButton label="导入文档" icon={<FileText className="h-4 w-4" />} onClick={() => fileInputRef.current?.click()} />
-        <ToolbarTextButton label="日程" icon={<Calendar className="h-4 w-4" />} onClick={() => runCommand("insertText", "\n[日程]\n")} />
-        <ToolbarTextButton label="表情" icon={<Smile className="h-4 w-4" />} onClick={() => runCommand("insertText", "🙂")} />
+        <ToolbarTextButton label="日程" icon={<Calendar className="h-4 w-4" />} onClick={() => setScheduleOpen(true)} />
+        <DropdownMenu open={emojiOpen} onOpenChange={setEmojiOpen}>
+          <DropdownMenuTrigger asChild>
+            <Button type="button" variant={emojiOpen ? "secondary" : "ghost"} size="sm" className="h-8 gap-1.5 rounded-md px-2 font-normal">
+              <Smile className="h-4 w-4" />表情
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-64 p-2">
+            <div className="grid grid-cols-8 gap-1">
+              {composerEmojiOptions.map((emoji) => (
+                <Button key={emoji} type="button" variant="ghost" size="icon" className="h-8 w-8 rounded-md text-lg" onClick={() => insertEmoji(emoji)}>
+                  {emoji}
+                </Button>
+              ))}
+            </div>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <ToolbarTextButton label="格式" icon={<Type className="h-4 w-4" />} active={formatOpen} onClick={() => setFormatOpen((value) => !value)} />
         <div className="ml-auto flex items-center gap-1">
           <ToolbarTextButton label="签名" icon={<Signature className="h-4 w-4" />} onClick={insertSignature} disabled={!signatureText.trim()} />
@@ -1471,38 +2044,44 @@ function MailBodyComposer({ defaultValue, files, signatureText, onChange, onPick
         </div>
       </div>
       {formatOpen && (
-        <div className="flex min-h-14 flex-wrap items-center gap-1 border-b bg-muted/40 px-6 py-2">
+        <div className="flex min-h-14 flex-wrap items-center gap-1 border-b bg-muted/40 px-6 py-2" onPointerDownCapture={saveSelection}>
           <ToolbarButton label="清除格式" onClick={() => runCommand("removeFormat")}><Eraser className="h-4 w-4" /></ToolbarButton>
           <Separator orientation="vertical" className="mx-2 h-6" />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button type="button" variant="ghost" size="sm" className="h-8 min-w-[112px] justify-between rounded-md px-2 font-normal">
-                默认字体<ChevronDown className="h-3.5 w-3.5" />
+              <Button type="button" variant={normalizeFontName(toolbarState.fontName) ? "secondary" : "ghost"} size="sm" className="h-8 min-w-[112px] justify-between rounded-md px-2 font-normal">
+                <span className="truncate">{fontLabel(toolbarState.fontName)}</span><ChevronDown className="h-3.5 w-3.5" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
-              {["Arial", "Georgia", "Times New Roman", "Courier New"].map((font) => (
-                <DropdownMenuItem key={font} onSelect={() => runCommand("fontName", font)}>{font}</DropdownMenuItem>
+              {composerFontOptions.map((font) => (
+                <DropdownMenuItem key={font} onSelect={() => applyFont(font)}>
+                  <Check className={cn("h-4 w-4", normalizeFontName(toolbarState.fontName) === font ? "opacity-100" : "opacity-0")} />
+                  <span style={{ fontFamily: font }}>{font}</span>
+                </DropdownMenuItem>
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button type="button" variant="ghost" size="sm" className="h-8 min-w-[84px] justify-between rounded-md px-2 font-normal">
-                字号<ChevronDown className="h-3.5 w-3.5" />
+              <Button type="button" variant={toolbarState.fontSize !== "3" ? "secondary" : "ghost"} size="sm" className="h-8 min-w-[84px] justify-between rounded-md px-2 font-normal">
+                {fontSizeLabel(toolbarState.fontSize)}<ChevronDown className="h-3.5 w-3.5" />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start">
-              {[["2", "小号"], ["3", "正文"], ["4", "中号"], ["5", "大号"]].map(([size, label]) => (
-                <DropdownMenuItem key={size} onSelect={() => runCommand("fontSize", size)}>{label}</DropdownMenuItem>
+              {composerFontSizeOptions.map(([size, label]) => (
+                <DropdownMenuItem key={size} onSelect={() => applyFontSize(size)}>
+                  <Check className={cn("h-4 w-4", toolbarState.fontSize === size ? "opacity-100" : "opacity-0")} />
+                  {label}
+                </DropdownMenuItem>
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
           <Separator orientation="vertical" className="mx-2 h-6" />
-          <ToolbarButton label="加粗" onClick={() => runCommand("bold")}><Bold className="h-4 w-4" /></ToolbarButton>
-          <ToolbarButton label="斜体" onClick={() => runCommand("italic")}><Italic className="h-4 w-4" /></ToolbarButton>
-          <ToolbarButton label="下划线" onClick={() => runCommand("underline")}><Underline className="h-4 w-4" /></ToolbarButton>
-          <ToolbarButton label="删除线" onClick={() => runCommand("strikeThrough")}><Strikethrough className="h-4 w-4" /></ToolbarButton>
+          <ToolbarButton label="加粗" active={toolbarState.bold} onClick={() => runCommand("bold")}><Bold className="h-4 w-4" /></ToolbarButton>
+          <ToolbarButton label="斜体" active={toolbarState.italic} onClick={() => runCommand("italic")}><Italic className="h-4 w-4" /></ToolbarButton>
+          <ToolbarButton label="下划线" active={toolbarState.underline} onClick={() => runCommand("underline")}><Underline className="h-4 w-4" /></ToolbarButton>
+          <ToolbarButton label="删除线" active={toolbarState.strikeThrough} onClick={() => runCommand("strikeThrough")}><Strikethrough className="h-4 w-4" /></ToolbarButton>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button type="button" variant="ghost" size="icon" className="h-8 w-8 rounded-md text-muted-foreground hover:text-foreground" title="文字颜色" aria-label="文字颜色">
@@ -1532,14 +2111,14 @@ function MailBodyComposer({ defaultValue, files, signatureText, onChange, onPick
             </DropdownMenuContent>
           </DropdownMenu>
           <Separator orientation="vertical" className="mx-2 h-6" />
-          <ToolbarButton label="无序列表" onClick={() => runCommand("insertUnorderedList")}><List className="h-4 w-4" /></ToolbarButton>
-          <ToolbarButton label="有序列表" onClick={() => runCommand("insertOrderedList")}><ListOrdered className="h-4 w-4" /></ToolbarButton>
+          <ToolbarButton label="无序列表" active={toolbarState.unorderedList} onClick={() => runCommand("insertUnorderedList")}><List className="h-4 w-4" /></ToolbarButton>
+          <ToolbarButton label="有序列表" active={toolbarState.orderedList} onClick={() => runCommand("insertOrderedList")}><ListOrdered className="h-4 w-4" /></ToolbarButton>
           <ToolbarButton label="减少缩进" onClick={() => runCommand("outdent")}><IndentDecrease className="h-4 w-4" /></ToolbarButton>
           <ToolbarButton label="增加缩进" onClick={() => runCommand("indent")}><IndentIncrease className="h-4 w-4" /></ToolbarButton>
           <Separator orientation="vertical" className="mx-2 h-6" />
-          <ToolbarButton label="左对齐" onClick={() => runCommand("justifyLeft")}><AlignLeft className="h-4 w-4" /></ToolbarButton>
-          <ToolbarButton label="居中" onClick={() => runCommand("justifyCenter")}><AlignCenter className="h-4 w-4" /></ToolbarButton>
-          <ToolbarButton label="右对齐" onClick={() => runCommand("justifyRight")}><AlignRight className="h-4 w-4" /></ToolbarButton>
+          <ToolbarButton label="左对齐" active={toolbarState.justifyLeft} onClick={() => runCommand("justifyLeft")}><AlignLeft className="h-4 w-4" /></ToolbarButton>
+          <ToolbarButton label="居中" active={toolbarState.justifyCenter} onClick={() => runCommand("justifyCenter")}><AlignCenter className="h-4 w-4" /></ToolbarButton>
+          <ToolbarButton label="右对齐" active={toolbarState.justifyRight} onClick={() => runCommand("justifyRight")}><AlignRight className="h-4 w-4" /></ToolbarButton>
           <ToolbarButton label="引用" onClick={() => runCommand("formatBlock", "blockquote")}><Quote className="h-4 w-4" /></ToolbarButton>
           <ToolbarButton label="代码块" onClick={() => runCommand("formatBlock", "pre")}><Code2 className="h-4 w-4" /></ToolbarButton>
         </div>
@@ -1553,8 +2132,10 @@ function MailBodyComposer({ defaultValue, files, signatureText, onChange, onPick
           contentEditable
           suppressContentEditableWarning
           className="mail-html min-h-[280px] overflow-y-auto px-6 py-5 text-base leading-7 outline-none"
-          onFocus={focusEditor}
-          onInput={() => { dirtyRef.current = true; syncEditor() }}
+          onFocus={() => { saveSelection(); updateToolbarState() }}
+          onMouseUp={() => { saveSelection(); updateToolbarState() }}
+          onKeyUp={() => { saveSelection(); updateToolbarState() }}
+          onInput={() => { dirtyRef.current = true; saveSelection(); syncEditor(); updateToolbarState() }}
           onBlur={syncEditor}
           dangerouslySetInnerHTML={{ __html: initialHtmlRef.current }}
         />
@@ -1575,24 +2156,378 @@ function MailBodyComposer({ defaultValue, files, signatureText, onChange, onPick
           </div>
         </div>
       )}
+      <InsertContentDialog state={insertDialog} onOpenChange={(open) => { if (!open) setInsertDialog(null) }} onConfirm={confirmInsert} />
+      <ScheduleDialog open={scheduleOpen} onOpenChange={setScheduleOpen} onConfirm={(schedule) => { insertSchedule(schedule); setScheduleOpen(false) }} />
     </div>
   )
 }
 
 function ToolbarTextButton({ label, icon, active, disabled, onClick }: { label: string; icon: React.ReactNode; active?: boolean; disabled?: boolean; onClick?: () => void }) {
   return (
-    <Button type="button" variant={active ? "secondary" : "ghost"} size="sm" className="h-8 gap-1.5 rounded-md px-2 font-normal" title={label} aria-label={label} onClick={onClick} disabled={disabled}>
+    <Button type="button" variant={active ? "secondary" : "ghost"} size="sm" className="h-8 gap-1.5 rounded-md px-2 font-normal" title={label} aria-label={label} aria-pressed={active || undefined} onClick={onClick} disabled={disabled}>
       {icon}{label}
     </Button>
   )
 }
 
-function ToolbarButton({ label, children, onClick, disabled }: { label: string; children: React.ReactNode; onClick?: () => void; disabled?: boolean }) {
-  return <Button type="button" variant="ghost" size="icon" className="h-8 w-8 rounded-md text-muted-foreground hover:text-foreground" title={label} aria-label={label} onClick={onClick} disabled={disabled}>{children}</Button>
+function InsertContentDialog({ state, onOpenChange, onConfirm }: { state: InsertDialogState | null; onOpenChange: (open: boolean) => void; onConfirm: (value: InsertDialogValue) => void }) {
+  const kind = state?.kind || "link"
+  const [url, setUrl] = React.useState("")
+  const [text, setText] = React.useState("")
+  const [alt, setAlt] = React.useState("")
+
+  React.useEffect(() => {
+    if (!state) return
+    setUrl("")
+    setText(state.kind === "link" ? state.selectedText : "")
+    setAlt("")
+  }, [state])
+
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!url.trim()) return
+    onConfirm({ url, text, alt })
+    onOpenChange(false)
+  }
+
+  return (
+    <Dialog open={!!state} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <form className="grid gap-4" onSubmit={submit}>
+          <DialogHeader>
+            <DialogTitle>{kind === "link" ? "插入链接" : "插入图片"}</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-2">
+            <Label htmlFor="composer-insert-url">{kind === "link" ? "链接地址" : "图片地址"}</Label>
+            <Input id="composer-insert-url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder={kind === "link" ? "https://example.com" : "https://example.com/image.png"} autoFocus />
+          </div>
+          {kind === "link" ? (
+            <div className="grid gap-2">
+              <Label htmlFor="composer-insert-text">显示文字</Label>
+              <Input id="composer-insert-text" value={text} onChange={(event) => setText(event.target.value)} placeholder="默认使用链接地址" />
+            </div>
+          ) : (
+            <div className="grid gap-2">
+              <Label htmlFor="composer-insert-alt">替代文字</Label>
+              <Input id="composer-insert-alt" value={alt} onChange={(event) => setAlt(event.target.value)} placeholder="图片说明" />
+            </div>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+            <Button type="submit">插入</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+type ScheduleDraft = {
+  title: string
+  start: string
+  durationMinutes: number
+  reminderMinutes: number
+  repeat: "none" | "daily" | "weekly" | "monthly" | "yearly"
+  allDay: boolean
+  customDuration: boolean
+  customReminder: boolean
+  lunar: boolean
+  location: string
+  description: string
+}
+
+const durationOptions = [
+  { value: "15", label: "15分钟" },
+  { value: "30", label: "30分钟" },
+  { value: "60", label: "1小时" },
+  { value: "120", label: "2小时" },
+  { value: "1440", label: "1天" },
+]
+const reminderOptions = [
+  { value: "0", label: "准时" },
+  { value: "5", label: "5分钟前" },
+  { value: "15", label: "15分钟前" },
+  { value: "30", label: "30分钟前" },
+  { value: "60", label: "1小时前" },
+  { value: "1440", label: "1天前" },
+]
+const repeatOptions = [
+  { value: "none", label: "永不" },
+  { value: "daily", label: "每天" },
+  { value: "weekly", label: "每周" },
+  { value: "monthly", label: "每月" },
+  { value: "yearly", label: "每年" },
+] as const
+
+function ScheduleDialog({ open, onOpenChange, onConfirm }: { open: boolean; onOpenChange: (open: boolean) => void; onConfirm: (schedule: ScheduleDraft) => void }) {
+  const [duration, setDuration] = React.useState("60")
+  const [reminder, setReminder] = React.useState("15")
+  const [repeat, setRepeat] = React.useState<ScheduleDraft["repeat"]>("none")
+  const [allDay, setAllDay] = React.useState(false)
+  const [customDuration, setCustomDuration] = React.useState(false)
+  const [customReminder, setCustomReminder] = React.useState(false)
+  const [lunar, setLunar] = React.useState(false)
+  const defaultStart = React.useMemo(() => defaultScheduleStartValue(), [open])
+  const { toast } = useToast()
+
+  function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const form = new FormData(event.currentTarget)
+    const title = String(form.get("title") || "").trim()
+    if (!title) {
+      toast({ title: "请输入日程主题" })
+      return
+    }
+    const durationMinutes = customDuration ? Number(form.get("customDuration") || 60) : Number(duration)
+    const reminderMinutes = customReminder ? Number(form.get("customReminder") || 15) : Number(reminder)
+    onConfirm({
+      title,
+      start: String(form.get("start") || defaultStart),
+      durationMinutes: Math.max(1, durationMinutes || 60),
+      reminderMinutes: Math.max(0, reminderMinutes || 0),
+      repeat,
+      allDay,
+      customDuration,
+      customReminder,
+      lunar,
+      location: String(form.get("location") || ""),
+      description: String(form.get("description") || ""),
+    })
+    event.currentTarget.reset()
+    setDuration("60")
+    setReminder("15")
+    setRepeat("none")
+    setAllDay(false)
+    setCustomDuration(false)
+    setCustomReminder(false)
+    setLunar(false)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="w-[min(92vw,36rem)] max-w-none">
+        <DialogHeader>
+          <DialogTitle>新建日程</DialogTitle>
+        </DialogHeader>
+        <form className="space-y-5" onSubmit={submit}>
+          <Input name="title" placeholder="输入日程主题" className="h-11 border-0 border-b px-0 text-lg shadow-none focus-visible:ring-0" />
+          <div className="grid gap-4">
+            <ScheduleRow label="开始">
+              <Input name="start" type={allDay ? "date" : "datetime-local"} defaultValue={allDay ? defaultStart.slice(0, 10) : defaultStart} className="h-11" />
+              <CheckLabel id="schedule-all-day" label="全天" checked={allDay} onCheckedChange={setAllDay} />
+            </ScheduleRow>
+            <ScheduleRow label="持续">
+              {customDuration ? (
+                <Input name="customDuration" type="number" min={1} defaultValue="60" className="h-11" />
+              ) : (
+                <Select value={duration} onValueChange={setDuration}>
+                  <SelectTrigger className="h-11"><SelectValue /></SelectTrigger>
+                  <SelectContent>{durationOptions.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
+                </Select>
+              )}
+              <CheckLabel id="schedule-custom-duration" label="自定义" checked={customDuration} onCheckedChange={setCustomDuration} />
+            </ScheduleRow>
+            <ScheduleRow label="提醒">
+              {customReminder ? (
+                <Input name="customReminder" type="number" min={0} defaultValue="15" className="h-11" />
+              ) : (
+                <Select value={reminder} onValueChange={setReminder}>
+                  <SelectTrigger className="h-11"><SelectValue /></SelectTrigger>
+                  <SelectContent>{reminderOptions.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
+                </Select>
+              )}
+              <CheckLabel id="schedule-custom-reminder" label="自定义" checked={customReminder} onCheckedChange={setCustomReminder} />
+            </ScheduleRow>
+            <ScheduleRow label="重复">
+              <Select value={repeat} onValueChange={(value) => setRepeat(value as ScheduleDraft["repeat"])}>
+                <SelectTrigger className="h-11"><SelectValue /></SelectTrigger>
+                <SelectContent>{repeatOptions.map((item) => <SelectItem key={item.value} value={item.value}>{item.label}</SelectItem>)}</SelectContent>
+              </Select>
+              <CheckLabel id="schedule-lunar" label="农历" checked={lunar} onCheckedChange={setLunar} />
+            </ScheduleRow>
+            <ScheduleRow label="位置">
+              <Input name="location" placeholder="请输入位置" className="h-11" />
+            </ScheduleRow>
+            <ScheduleRow label="描述">
+              <Input name="description" placeholder="输入描述" className="h-11" />
+            </ScheduleRow>
+          </div>
+          <DialogFooter>
+            <Button type="submit">确定</Button>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>取消</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function ScheduleRow({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="grid gap-2 sm:grid-cols-[3rem_minmax(0,1fr)_5.5rem] sm:items-center">
+      <Label className="text-base font-normal">{label}</Label>
+      {children}
+    </div>
+  )
+}
+
+function CheckLabel({ id, label, checked, onCheckedChange }: { id: string; label: string; checked: boolean; onCheckedChange: (checked: boolean) => void }) {
+  return (
+    <div className="flex items-center gap-2">
+      <Checkbox id={id} checked={checked} onCheckedChange={(value) => onCheckedChange(value === true)} />
+      <Label htmlFor={id} className="cursor-pointer text-sm font-normal">{label}</Label>
+    </div>
+  )
+}
+
+function ToolbarButton({ label, children, active, onClick, disabled }: { label: string; children: React.ReactNode; active?: boolean; onClick?: () => void; disabled?: boolean }) {
+  return (
+    <Button
+      type="button"
+      variant={active ? "secondary" : "ghost"}
+      size="icon"
+      className={cn("h-8 w-8 rounded-md", active ? "text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground")}
+      title={label}
+      aria-label={label}
+      aria-pressed={active || undefined}
+      onClick={onClick}
+      disabled={disabled}
+    >
+      {children}
+    </Button>
+  )
 }
 
 function splitEmails(s: string) { return s.split(/[;,，\s]+/).map((v) => v.trim()).filter(Boolean) }
+function defaultScheduledSendValue() {
+  const date = new Date(Date.now() + 30 * 60 * 1000)
+  const minute = date.getMinutes()
+  date.setMinutes(minute + (5 - (minute % 5 || 5)))
+  return toDateTimeLocalValue(date)
+}
+function scheduledSendPresets() {
+  return [
+    { label: "30 分钟后", value: toDateTimeLocalValue(new Date(Date.now() + 30 * 60 * 1000)) },
+    { label: "2 小时后", value: toDateTimeLocalValue(new Date(Date.now() + 2 * 60 * 60 * 1000)) },
+    { label: "明早 9 点", value: toDateTimeLocalValue(nextMorningAtNine()) },
+    { label: "下周一 9 点", value: toDateTimeLocalValue(nextMondayAtNine()) },
+  ]
+}
+function nextMorningAtNine() {
+  const date = new Date()
+  date.setDate(date.getDate() + 1)
+  date.setHours(9, 0, 0, 0)
+  return date
+}
+function nextMondayAtNine() {
+  const date = new Date()
+  const day = date.getDay()
+  const daysUntilMonday = (8 - day) % 7 || 7
+  date.setDate(date.getDate() + daysUntilMonday)
+  date.setHours(9, 0, 0, 0)
+  return date
+}
+function defaultScheduleStartValue() {
+  const date = new Date()
+  date.setMinutes(date.getMinutes() + (60 - (date.getMinutes() % 60 || 60)))
+  return toDateTimeLocalValue(date)
+}
+function toDateTimeLocalValue(date: Date) {
+  const pad = (value: number) => String(value).padStart(2, "0")
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+function normalizeSchedule(schedule: ScheduleDraft): ScheduleDraft {
+  return { ...schedule, title: schedule.title.trim(), location: schedule.location.trim(), description: schedule.description.trim() }
+}
+function scheduleToHtml(schedule: ScheduleDraft) {
+  const start = parseScheduleStart(schedule)
+  const end = schedule.allDay ? new Date(start.getTime() + 24 * 60 * 60 * 1000) : new Date(start.getTime() + schedule.durationMinutes * 60 * 1000)
+  const rows = [
+    ["时间", schedule.allDay ? formatDate(start.toISOString()) : `${formatDateTime(start.toISOString())} - ${formatTimeOnly(end)}`],
+    ["持续", schedule.allDay ? "全天" : durationLabel(schedule.durationMinutes)],
+    ["提醒", reminderLabel(schedule.reminderMinutes)],
+    ["重复", repeatLabel(schedule.repeat)],
+    schedule.location ? ["位置", schedule.location] : undefined,
+    schedule.description ? ["描述", schedule.description] : undefined,
+  ].filter(Boolean) as string[][]
+  return DOMPurify.sanitize(`
+    <div style="border:1px solid #d4d4d8;border-radius:8px;padding:14px 16px;margin:16px 0;background:#fafafa;">
+      <div style="font-weight:600;font-size:16px;margin-bottom:10px;">${escapeHtml(schedule.title)}</div>
+      ${rows.map(([label, value]) => `<div style="margin:6px 0;"><span style="color:#71717a;">${label}：</span>${escapeHtml(value)}</div>`).join("")}
+    </div>
+  `)
+}
+function scheduleToFile(schedule: ScheduleDraft) {
+  const ics = scheduleToIcs(schedule)
+  const filename = `${safeFilename(schedule.title || "schedule")}.ics`
+  return new File([ics], filename, { type: "text/calendar;charset=utf-8" })
+}
+function scheduleToIcs(schedule: ScheduleDraft) {
+  const start = parseScheduleStart(schedule)
+  const end = schedule.allDay ? new Date(start.getTime() + 24 * 60 * 60 * 1000) : new Date(start.getTime() + schedule.durationMinutes * 60 * 1000)
+  const uid = `${Date.now()}-${Math.random().toString(36).slice(2)}@lanqin-email`
+  const lines = [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//LanQin Email//Webmail//CN",
+    "CALSCALE:GREGORIAN",
+    "METHOD:PUBLISH",
+    "BEGIN:VEVENT",
+    `UID:${uid}`,
+    `DTSTAMP:${toIcsDateTime(new Date())}`,
+    schedule.allDay ? `DTSTART;VALUE=DATE:${toIcsDate(start)}` : `DTSTART:${toIcsDateTime(start)}`,
+    schedule.allDay ? `DTEND;VALUE=DATE:${toIcsDate(end)}` : `DTEND:${toIcsDateTime(end)}`,
+    `SUMMARY:${escapeIcs(schedule.title)}`,
+    schedule.location ? `LOCATION:${escapeIcs(schedule.location)}` : "",
+    schedule.description ? `DESCRIPTION:${escapeIcs(schedule.description)}` : "",
+    schedule.repeat !== "none" ? `RRULE:FREQ=${schedule.repeat.toUpperCase()}` : "",
+  ].filter(Boolean)
+  if (schedule.reminderMinutes > 0) {
+    lines.push("BEGIN:VALARM", `TRIGGER:-PT${schedule.reminderMinutes}M`, "ACTION:DISPLAY", `DESCRIPTION:${escapeIcs(schedule.title)}`, "END:VALARM")
+  }
+  lines.push("END:VEVENT", "END:VCALENDAR")
+  return `${lines.join("\r\n")}\r\n`
+}
+function parseScheduleStart(schedule: ScheduleDraft) {
+  const value = schedule.allDay ? `${schedule.start.slice(0, 10)}T00:00` : schedule.start
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? new Date() : date
+}
+function toIcsDateTime(date: Date) {
+  const pad = (value: number) => String(value).padStart(2, "0")
+  return `${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(date.getUTCDate())}T${pad(date.getUTCHours())}${pad(date.getUTCMinutes())}${pad(date.getUTCSeconds())}Z`
+}
+function toIcsDate(date: Date) {
+  const pad = (value: number) => String(value).padStart(2, "0")
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}`
+}
+function formatTimeOnly(date: Date) {
+  return date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })
+}
+function durationLabel(minutes: number) {
+  if (minutes % 1440 === 0) return `${minutes / 1440}天`
+  if (minutes % 60 === 0) return `${minutes / 60}小时`
+  return `${minutes}分钟`
+}
+function reminderLabel(minutes: number) {
+  if (minutes <= 0) return "准时"
+  return `${durationLabel(minutes)}前`
+}
+function repeatLabel(repeat: ScheduleDraft["repeat"]) {
+  return ({ none: "永不", daily: "每天", weekly: "每周", monthly: "每月", yearly: "每年" } as Record<ScheduleDraft["repeat"], string>)[repeat]
+}
+function safeFilename(value: string) {
+  return value.trim().replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, "-").slice(0, 64) || "schedule"
+}
+function escapeIcs(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/,/g, "\\,").replace(/;/g, "\\;")
+}
 function plainTextComposerValue(value: string): ComposerValue { return { text: value, html: plainTextToHtml(value) } }
+function htmlComposerValue(value: string): ComposerValue {
+  const html = DOMPurify.sanitize(value || "")
+  const text = stripHtml(html)
+  return { text, html: html || plainTextToHtml(text) }
+}
 function composerValueFromElement(element: HTMLElement | null): ComposerValue {
   const text = (element?.innerText || "").replace(/\u00a0/g, " ").trimEnd()
   if (!text.trim()) return { text: "", html: "" }
@@ -1643,4 +2578,12 @@ async function fileToAttachment(file: File) {
   const bytes = new Uint8Array(buffer)
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
   return { filename: file.name, contentType: file.type || "application/octet-stream", contentBase64: btoa(binary) }
+}
+async function attachmentFilesFromMessage(message: MailMessage) {
+  if (!message.attachments?.length) return []
+  return Promise.all(message.attachments.map(async (attachment) => {
+    const response = await fetch(`/api/mail/attachments/${attachment.id}`, { credentials: "include" })
+    const blob = await response.blob()
+    return new File([blob], attachment.filename, { type: attachment.contentType || blob.type || "application/octet-stream" })
+  }))
 }

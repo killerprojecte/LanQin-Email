@@ -301,6 +301,72 @@ func TestAuthAdminAndLocalDeliveryFlow(t *testing.T) {
 	}
 }
 
+func TestScheduleSendQueuesFutureMessage(t *testing.T) {
+	a := newTestApp(t)
+	ts := httptest.NewServer(a.Router())
+	defer ts.Close()
+	admin := &testClient{t: t, server: ts}
+
+	var login map[string]any
+	if code := admin.do("POST", "/api/auth/login", map[string]string{"email": "admin@lanqin.local", "password": "ChangeMe123!"}, &login); code != http.StatusOK {
+		t.Fatalf("admin login code=%d", code)
+	}
+	var domains struct {
+		Items []Domain `json:"items"`
+	}
+	if code := admin.do("GET", "/api/admin/domains", nil, &domains); code != http.StatusOK || len(domains.Items) == 0 {
+		t.Fatalf("domains code=%d items=%+v", code, domains.Items)
+	}
+	sender := createTestMailbox(t, admin, domains.Items[0].ID, "later", "Later", "Password123!", nil)
+	recipient := createTestMailbox(t, admin, domains.Items[0].ID, "later-bob", "Later Bob", "Password123!", nil)
+
+	alice := &testClient{t: t, server: ts}
+	if code := alice.do("POST", "/api/auth/login", map[string]string{"email": sender.Address, "password": "Password123!"}, &login); code != http.StatusOK {
+		t.Fatalf("sender login code=%d", code)
+	}
+	var scheduled ScheduledSend
+	payload := map[string]any{
+		"mailboxId": sender.ID,
+		"to":        []string{recipient.Address},
+		"subject":   "send later",
+		"text":      "not yet",
+		"html":      "<p>not yet</p>",
+		"sendAt":    time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339Nano),
+	}
+	if code := alice.do("POST", "/api/mail/schedule-send", payload, &scheduled); code != http.StatusCreated || scheduled.Status != "pending" {
+		t.Fatalf("schedule code=%d scheduled=%+v", code, scheduled)
+	}
+	if scheduled.Subject != "send later" || len(scheduled.To) != 1 || scheduled.To[0] != recipient.Address || scheduled.Snippet != "not yet" {
+		t.Fatalf("scheduled preview not populated: %+v", scheduled)
+	}
+	var scheduledList struct {
+		Items []ScheduledSend `json:"items"`
+	}
+	if code := alice.do("GET", "/api/mail/scheduled-sends?mailboxId="+sender.ID, nil, &scheduledList); code != http.StatusOK || len(scheduledList.Items) != 1 || scheduledList.Items[0].ID != scheduled.ID {
+		t.Fatalf("scheduled list code=%d items=%+v", code, scheduledList.Items)
+	}
+	if scheduledList.Items[0].Subject != "send later" || scheduledList.Items[0].Snippet != "not yet" {
+		t.Fatalf("scheduled list preview not populated: %+v", scheduledList.Items[0])
+	}
+
+	bob := &testClient{t: t, server: ts}
+	if code := bob.do("POST", "/api/auth/login", map[string]string{"email": recipient.Address, "password": "Password123!"}, &login); code != http.StatusOK {
+		t.Fatalf("recipient login code=%d", code)
+	}
+	var inbox struct {
+		Items []MailMessage `json:"items"`
+	}
+	if code := bob.do("GET", "/api/mail/messages?folder=Inbox", nil, &inbox); code != http.StatusOK || len(inbox.Items) != 0 {
+		t.Fatalf("future scheduled mail should not be delivered immediately: code=%d items=%+v", code, inbox.Items)
+	}
+	if code := alice.do("DELETE", "/api/mail/schedule-send/"+scheduled.ID, nil, &map[string]any{}); code != http.StatusOK {
+		t.Fatalf("cancel scheduled send code=%d", code)
+	}
+	if code := alice.do("GET", "/api/mail/scheduled-sends?mailboxId="+sender.ID, nil, &scheduledList); code != http.StatusOK || len(scheduledList.Items) != 0 {
+		t.Fatalf("scheduled list after cancel code=%d items=%+v", code, scheduledList.Items)
+	}
+}
+
 func TestOpenRegistrationCreatesLoginUserOnly(t *testing.T) {
 	a := newTestApp(t)
 	ts := httptest.NewServer(a.Router())
