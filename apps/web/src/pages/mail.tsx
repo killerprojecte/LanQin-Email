@@ -1780,14 +1780,14 @@ function ComposeDialog({ mailbox, open, draft, onOpenChange, onSent }: { mailbox
               </span>
             </DialogTitle>
           </DialogHeader>
-          <div className="flex-1 overflow-y-auto">
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
             <ComposeField label="发件邮箱">
               <Input value={mailbox?.address || "未选择"} readOnly className="h-10 flex-1 rounded-none border-0 px-0 shadow-none focus-visible:ring-0" />
             </ComposeField>
             <ComposeField
               label="收件人"
               action={
-                <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 text-sm">
+                <div className="flex shrink-0 flex-wrap items-center justify-start gap-1 text-sm sm:justify-end sm:gap-2">
                   <Button type="button" variant="ghost" size="sm" className="h-8 px-2 font-normal" onClick={() => setShowCc((value) => !value)}>抄送</Button>
                   <Button type="button" variant="ghost" size="sm" className="h-8 px-2 font-normal" onClick={() => setShowBcc((value) => !value)}>密送</Button>
                   <div className="flex items-center gap-2 rounded-md px-2 py-1">
@@ -1822,7 +1822,7 @@ function ComposeDialog({ mailbox, open, draft, onOpenChange, onSent }: { mailbox
               onRemoveFile={(index) => { setAttachmentsTouched(true); setFiles((current) => current.filter((_, itemIndex) => itemIndex !== index)) }}
             />
           </div>
-          <DialogFooter className="flex-row justify-end gap-2 border-t bg-background px-4 py-3 sm:px-6 sm:py-4">
+          <DialogFooter className="grid grid-cols-3 gap-2 border-t bg-background px-4 py-3 sm:flex sm:flex-row sm:justify-end sm:px-6 sm:py-4">
             <Button type="button" variant="outline" className="min-h-10 px-3" onClick={() => onOpenChange(false)}>取消</Button>
             <Button type="button" variant="outline" className="min-h-10 px-3" disabled={send.isPending || scheduleSend.isPending || !mailbox} onClick={() => setScheduleDialogOpen(true)}><Calendar className="h-4 w-4" />定时</Button>
             <Button className="min-h-10 px-4" disabled={send.isPending || !mailbox}><Send className="h-4 w-4" />{send.isPending ? "发送中..." : "发送"}</Button>
@@ -2056,13 +2056,19 @@ function MailBodyComposer({ defaultValue, defaultHtml, files, signatureText, onC
   const fileInputRef = React.useRef<HTMLInputElement>(null)
   const dirtyRef = React.useRef(false)
   const lastDefaultRef = React.useRef(`${defaultValue}\n${defaultHtml || ""}`)
-  const [formatOpen, setFormatOpen] = React.useState(true)
+  const isMobile = useIsMobile()
+  const [formatOpen, setFormatOpen] = React.useState(() => typeof window === "undefined" ? true : window.innerWidth >= 768)
   const [scheduleOpen, setScheduleOpen] = React.useState(false)
   const [emojiOpen, setEmojiOpen] = React.useState(false)
   const [insertDialog, setInsertDialog] = React.useState<InsertDialogState | null>(null)
   const [previewOpen, setPreviewOpen] = React.useState(false)
   const [empty, setEmpty] = React.useState(!defaultValue.trim())
   const [selectionVersion, setSelectionVersion] = React.useState(0)
+
+  React.useEffect(() => {
+    setFormatOpen(!isMobile)
+  }, [isMobile])
+
   const editor = useEditor({
     extensions: [
       StarterKit.configure({ link: false }),
@@ -2084,7 +2090,7 @@ function MailBodyComposer({ defaultValue, defaultHtml, files, signatureText, onC
     content: composerInitialHtml(defaultValue, defaultHtml),
     editorProps: {
       attributes: {
-        class: "mail-html min-h-[260px] overflow-y-auto px-4 py-4 text-base leading-7 outline-none sm:min-h-[280px] sm:px-6 sm:py-5",
+        class: "mail-html w-full outline-none",
         "aria-label": "正文",
       },
       handlePaste(view, event) {
@@ -2206,13 +2212,12 @@ function MailBodyComposer({ defaultValue, defaultHtml, files, signatureText, onC
   }
 
   return (
-    <div className="min-h-[360px] sm:min-h-[420px]">
+    <div className="flex min-h-[330px] flex-1 flex-col bg-background sm:min-h-[420px]">
       <Input ref={fileInputRef} type="file" multiple className="hidden" onChange={handlePickedFiles} />
-      <div className="flex min-h-11 flex-nowrap items-center gap-1 overflow-x-auto border-b px-4 py-2 sm:flex-wrap sm:overflow-visible sm:px-6">
+      <div className="flex min-h-11 flex-wrap items-center gap-1 overflow-visible border-b px-3 py-2 sm:px-6">
         <ToolbarButton label="撤销" disabled={!editor?.can().undo()} onClick={() => editor?.chain().focus().undo().run()}><Undo2 className="h-4 w-4" /></ToolbarButton>
         <ToolbarButton label="重做" disabled={!editor?.can().redo()} onClick={() => editor?.chain().focus().redo().run()}><Redo2 className="h-4 w-4" /></ToolbarButton>
         <Separator orientation="vertical" className="mx-2 h-6" />
-        <ToolbarTextButton label="图片" icon={<Image className="h-4 w-4" />} active={editor?.isActive("image")} disabled={!editor} onClick={() => openInsertDialog("image")} />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button type="button" variant="ghost" size="sm" className="h-8 gap-1 rounded-md px-2 font-normal hover:bg-accent hover:shadow-sm" onMouseDown={(event) => event.preventDefault()}>
@@ -2226,7 +2231,6 @@ function MailBodyComposer({ defaultValue, defaultHtml, files, signatureText, onC
             <DropdownMenuItem className={composerMenuItemClass} onSelect={() => editor?.chain().focus().setHorizontalRule().run()}><span className="h-4 w-4 border-t border-current" aria-hidden />分隔线</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-        <ToolbarTextButton label="导入文档" icon={<FileText className="h-4 w-4" />} onClick={() => fileInputRef.current?.click()} />
         <ToolbarTextButton label="日程" icon={<Calendar className="h-4 w-4" />} onClick={() => setScheduleOpen(true)} />
         <DropdownMenu open={emojiOpen} onOpenChange={setEmojiOpen}>
           <DropdownMenuTrigger asChild>
@@ -2245,14 +2249,13 @@ function MailBodyComposer({ defaultValue, defaultHtml, files, signatureText, onC
           </DropdownMenuContent>
         </DropdownMenu>
         <ToolbarTextButton label="格式" icon={<Type className="h-4 w-4" />} active={formatOpen} onClick={() => setFormatOpen((value) => !value)} />
-        <div className="ml-auto flex items-center gap-1">
+        <div className="flex items-center gap-1">
           <ToolbarTextButton label="预览" icon={<Eye className="h-4 w-4" />} active={previewOpen} onClick={() => setPreviewOpen(true)} />
           <ToolbarTextButton label="签名" icon={<Signature className="h-4 w-4" />} onClick={insertSignature} disabled={!signatureText.trim()} />
-          <ToolbarButton label="更多"><Ellipsis className="h-4 w-4" /></ToolbarButton>
         </div>
       </div>
       {formatOpen && (
-        <div className="flex min-h-14 flex-nowrap items-center gap-1 overflow-x-auto border-b bg-muted/40 px-4 py-2 sm:flex-wrap sm:overflow-visible sm:px-6">
+        <div className="flex min-h-14 flex-wrap items-center gap-1 overflow-visible border-b bg-muted/40 px-3 py-2 sm:px-6">
           <ToolbarButton label="清除格式" disabled={!editor} onClick={() => editor?.chain().focus().unsetAllMarks().clearNodes().run()}><Eraser className="h-4 w-4" /></ToolbarButton>
           <Separator orientation="vertical" className="mx-2 h-6" />
           <DropdownMenu>
@@ -2334,13 +2337,13 @@ function MailBodyComposer({ defaultValue, defaultHtml, files, signatureText, onC
         </div>
       )}
       <div className={cn(
-        "composer-editor relative",
-        "[&_.ProseMirror]:min-h-[260px] [&_.ProseMirror]:overflow-y-auto [&_.ProseMirror]:px-4 [&_.ProseMirror]:py-4 [&_.ProseMirror]:text-base [&_.ProseMirror]:leading-7 [&_.ProseMirror]:outline-none sm:[&_.ProseMirror]:min-h-[280px] sm:[&_.ProseMirror]:px-6 sm:[&_.ProseMirror]:py-5",
+        "composer-editor relative flex min-h-[240px] flex-1 border-b focus-within:bg-card/40 sm:min-h-[280px]",
+        "[&_.ProseMirror]:min-h-[240px] [&_.ProseMirror]:w-full [&_.ProseMirror]:flex-1 [&_.ProseMirror]:overflow-y-auto [&_.ProseMirror]:px-4 [&_.ProseMirror]:py-4 [&_.ProseMirror]:text-base [&_.ProseMirror]:leading-7 [&_.ProseMirror]:outline-none sm:[&_.ProseMirror]:min-h-[280px] sm:[&_.ProseMirror]:px-6 sm:[&_.ProseMirror]:py-5",
         "[&_.ProseMirror_p.is-editor-empty:first-child::before]:pointer-events-none [&_.ProseMirror_p.is-editor-empty:first-child::before]:float-left [&_.ProseMirror_p.is-editor-empty:first-child::before]:h-0 [&_.ProseMirror_p.is-editor-empty:first-child::before]:text-muted-foreground [&_.ProseMirror_p.is-editor-empty:first-child::before]:content-[attr(data-placeholder)]",
         "[&_.ProseMirror_ul]:list-disc [&_.ProseMirror_ol]:list-decimal [&_.ProseMirror_ul]:pl-6 [&_.ProseMirror_ol]:pl-6 [&_.ProseMirror_blockquote]:border-l-4 [&_.ProseMirror_blockquote]:border-border [&_.ProseMirror_blockquote]:pl-4 [&_.ProseMirror_blockquote]:text-muted-foreground [&_.ProseMirror_pre]:rounded-md [&_.ProseMirror_pre]:bg-muted [&_.ProseMirror_pre]:p-3",
         empty && "bg-background"
       )}>
-        <EditorContent editor={editor} />
+        <EditorContent editor={editor} className="flex min-h-0 flex-1" />
       </div>
       {files.length > 0 && (
         <div className="border-t px-4 py-3 sm:px-6">
