@@ -4,7 +4,7 @@ import { useSearchParams } from "react-router-dom"
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArrowRight, CheckCircle2, Circle, Copy, Globe2, Mailbox, MoreHorizontal, Plus, RefreshCcw, Search, ShieldCheck, Trash2, Users } from "lucide-react"
 import { api, AdminUser, Alias, DNSRecord, Domain, Mailbox as MailboxType, MailMessage, MailTemplate, SystemSettings } from "@/lib/api"
-import { cn, formatBytes, formatDate } from "@/lib/utils"
+import { cn, decodeMimeHeader, formatBytes, formatDate } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -808,30 +808,6 @@ function folderName(folder: string) {
 
 function escapeHtml(value: string) {
   return value.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char] || char)
-}
-
-/**
- * Decode RFC 2047 encoded words in mail headers (e.g. =?UTF-8?B?5byA5ZSu?=).
- * Handles Base64 (B) and Quoted-Printable (Q) encoding.
- */
-function decodeMimeHeader(value: string): string {
-  if (!value || !value.includes("=?")) return value
-  return value.replace(/=\?([^?]+)\?([bBqQ])\?([^?]*)\?=/g, (_match, charset, encoding, encoded) => {
-    try {
-      const lowerEncoding = String(encoding).toLowerCase()
-      let decoded: string
-      if (lowerEncoding === "b") {
-        decoded = atob(encoded)
-      } else {
-        decoded = encoded.replace(/_/g, " ").replace(/=([0-9a-fA-F]{2})/g, (_m: string, hex: string) => String.fromCharCode(parseInt(hex, 16)))
-      }
-      const bytes = new Uint8Array(Array.from(decoded, (ch) => ch.charCodeAt(0)))
-      const decoder = new TextDecoder(String(charset).toLowerCase() || "utf-8")
-      return decoder.decode(bytes)
-    } catch {
-      return _match
-    }
-  })
 }
 
 function adminSenderDisplayName(message: MailMessage) {

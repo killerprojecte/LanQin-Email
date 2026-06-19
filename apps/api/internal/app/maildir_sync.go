@@ -17,6 +17,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"golang.org/x/text/encoding"
+	"golang.org/x/text/encoding/ianaindex"
 )
 
 type maildirMailbox struct {
@@ -350,8 +353,7 @@ func (a *App) parseMaildirMessage(raw []byte, fallbackTo string) (storedMessage,
 	if err != nil {
 		return storedMessage{}, nil, err
 	}
-	decoder := new(mime.WordDecoder)
-	subject, _ := decoder.DecodeHeader(m.Header.Get("Subject"))
+	subject := decodeMIMEHeader(m.Header.Get("Subject"))
 	if strings.TrimSpace(subject) == "" {
 		subject = "(no subject)"
 	}
@@ -460,42 +462,31 @@ func transferReader(encoding string, r io.Reader) io.Reader {
 }
 
 func partFilename(header textproto.MIMEHeader) string {
-	decoder := new(mime.WordDecoder)
 	if _, params, err := mime.ParseMediaType(header.Get("Content-Disposition")); err == nil {
 		if name := strings.TrimSpace(params["filename"]); name != "" {
-			decoded, _ := decoder.DecodeHeader(name)
-			if decoded != "" {
-				name = decoded
-			}
-			return filepath.Base(name)
+			return filepath.Base(decodeMIMEHeader(name))
 		}
 	}
 	if _, params, err := mime.ParseMediaType(header.Get("Content-Type")); err == nil {
 		if name := strings.TrimSpace(params["name"]); name != "" {
-			decoded, _ := decoder.DecodeHeader(name)
-			if decoded != "" {
-				name = decoded
-			}
-			return filepath.Base(name)
+			return filepath.Base(decodeMIMEHeader(name))
 		}
 	}
 	return ""
 }
 
 func firstAddressParts(value string) (string, string) {
-	items, err := netmail.ParseAddressList(value)
+	// Proactively decode RFC 2047 encoded words before parsing, so that
+	// non-UTF-8 charsets (e.g. GBK, Shift_JIS) are handled by our
+	// CharsetReader instead of Go's default WordDecoder which only
+	// supports UTF-8 and ISO-8859-1.
+	decoded := decodeMIMEHeader(value)
+	items, err := netmail.ParseAddressList(decoded)
 	if err != nil || len(items) == 0 {
-		// ParseAddressList failed — attempt RFC 2047 decode on the raw header,
-		// then retry parsing. This handles non-standard From headers where
-		// encoded words (e.g. =?UTF-8?B?…?=) cause the initial parse to fail.
-		decoded := decodeMIMEHeader(value)
-		items, err = netmail.ParseAddressList(decoded)
-		if err != nil || len(items) == 0 {
-			// Still unparseable: return the decoded value as the email and
-			// try to extract a display name from the decoded string.
-			email, name := splitNameAndEmail(decoded)
-			return normalizeEmail(email), strings.TrimSpace(name)
-		}
+		// Still unparseable: return the decoded value and try to extract
+		// a display name from the decoded string.
+		email, name := splitNameAndEmail(decoded)
+		return normalizeEmail(email), strings.TrimSpace(name)
 	}
 	item := items[0]
 	return normalizeEmail(item.Address), strings.TrimSpace(item.Name)
@@ -503,16 +494,35 @@ func firstAddressParts(value string) (string, string) {
 
 // decodeMIMEHeader decodes all RFC 2047 encoded words (=?charset?encoding?data?=)
 // in the given header value. Falls back to the original value on any error.
+// Supports non-UTF-8 charsets (e.g. GBK, GB2312, Shift_JIS) via x/text.
 func decodeMIMEHeader(value string) string {
 	if !strings.Contains(value, "=?") {
 		return value
 	}
-	decoder := new(mime.WordDecoder)
+	decoder := &mime.WordDecoder{
+		CharsetReader: charsetReader,
+	}
 	decoded, err := decoder.DecodeHeader(value)
 	if err != nil {
 		return value
 	}
 	return decoded
+}
+
+// charsetReader converts a non-UTF-8 charset stream into UTF-8 using x/text encodings.
+func charsetReader(charset string, input io.Reader) (io.Reader, error) {
+	charset = strings.ToLower(strings.TrimSpace(charset))
+	if charset == "utf-8" || charset == "us-ascii" {
+		return input, nil
+	}
+	enc, err := ianaindex.IANA.Encoding(charset)
+	if err != nil {
+		return nil, fmt.Errorf("unsupported charset %q: %w", charset, err)
+	}
+	if enc == encoding.Nop || enc == encoding.Replacement {
+		return nil, fmt.Errorf("unsupported charset %q", charset)
+	}
+	return enc.NewDecoder().Reader(input), nil
 }
 
 // splitNameAndEmail attempts to extract a display name and email address from
@@ -523,7 +533,7 @@ func splitNameAndEmail(value string) (string, string) {
 		return "", ""
 	}
 	// Try "Name <email>" pattern
-	if idx := strings.LastIndex(value, "<"); idx > 0 {
+	if idx := strings.LastIndex(value, "<"); idx >= 0 {
 		email := strings.TrimRight(value[idx+1:], ">")
 		name := strings.TrimSpace(strings.Trim(value[:idx], `" `))
 		if strings.Contains(email, "@") {
@@ -539,8 +549,13 @@ func splitNameAndEmail(value string) (string, string) {
 
 func addressList(value string) []string {
 	items, err := netmail.ParseAddressList(value)
-	if err != nil {
-		return nil
+	if err != nil || len(items) == 0 {
+		// ParseAddressList failed — attempt RFC 2047 decode, then retry.
+		decoded := decodeMIMEHeader(value)
+		items, err = netmail.ParseAddressList(decoded)
+		if err != nil || len(items) == 0 {
+			return nil
+		}
 	}
 	out := make([]string, 0, len(items))
 	for _, item := range items {

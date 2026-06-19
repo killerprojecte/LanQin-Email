@@ -14,7 +14,7 @@ import { useNavigate } from "react-router-dom"
 import type { ImperativePanelHandle } from "react-resizable-panels"
 import { AlignCenter, AlignLeft, AlignRight, Archive, ArrowLeft, Bold, Calendar, Check, ChevronDown, ChevronsUpDown, Clock3, Code2, Copy, Ellipsis, Eraser, Eye, FileText, Forward, Highlighter, Image, Inbox, IndentDecrease, IndentIncrease, Italic, Link, List, ListOrdered, Mail, MailCheck, Moon, PanelLeftClose, PanelLeftOpen, Paperclip, PencilLine, Plus, Quote, Redo2, RefreshCcw, Reply, Search, Send, Settings, Signature, SlidersHorizontal, Smile, Star, Strikethrough, Sun, Tag, Trash2, Type, Underline, Undo2, X } from "lucide-react"
 import { api, Mailbox, MailFolder, MailLabel, MailMessage, SendPayload, DraftPayload, ScheduledSend } from "@/lib/api"
-import { cn, formatBytes, formatDate, formatDateTime } from "@/lib/utils"
+import { cn, decodeMimeHeader, formatBytes, formatDate, formatDateTime } from "@/lib/utils"
 import { applyTheme, getInitialTheme } from "@/lib/theme"
 import { useDisplayMode } from "@/lib/display-mode"
 import { Button } from "@/components/ui/button"
@@ -1291,31 +1291,6 @@ function MailboxSwitcher({ collapsed, mailboxes, selectedMailbox, onSelect }: { 
       </DropdownMenuContent>
     </DropdownMenu>
   )
-}
-
-/**
- * Decode RFC 2047 encoded words in mail headers (e.g. =?UTF-8?B?5byA5ZSu?=).
- * Handles Base64 (B) and Quoted-Printable (Q) encoding.
- * Returns the original string unchanged if no encoded words are found or on error.
- */
-function decodeMimeHeader(value: string): string {
-  if (!value || !value.includes("=?")) return value
-  return value.replace(/=\?([^?]+)\?([bBqQ])\?([^?]*)\?=/g, (_match, charset, encoding, encoded) => {
-    try {
-      const lowerEncoding = String(encoding).toLowerCase()
-      let decoded: string
-      if (lowerEncoding === "b") {
-        decoded = atob(encoded)
-      } else {
-        decoded = encoded.replace(/_/g, " ").replace(/=([0-9a-fA-F]{2})/g, (_m: string, hex: string) => String.fromCharCode(parseInt(hex, 16)))
-      }
-      const bytes = new Uint8Array(Array.from(decoded, (ch) => ch.charCodeAt(0)))
-      const decoder = new TextDecoder(String(charset).toLowerCase() || "utf-8")
-      return decoder.decode(bytes)
-    } catch {
-      return _match
-    }
-  })
 }
 
 function cleanAccountName(name: string, email?: string) {
