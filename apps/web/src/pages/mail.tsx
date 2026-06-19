@@ -14,7 +14,7 @@ import { useNavigate } from "react-router-dom"
 import type { ImperativePanelHandle } from "react-resizable-panels"
 import { AlignCenter, AlignLeft, AlignRight, Archive, ArrowLeft, Bold, Calendar, Check, ChevronDown, ChevronsUpDown, Clock3, Code2, Copy, Ellipsis, Eraser, Eye, FileText, Forward, Highlighter, Image, Inbox, IndentDecrease, IndentIncrease, Italic, Link, List, ListOrdered, Mail, MailCheck, Moon, PanelLeftClose, PanelLeftOpen, Paperclip, PencilLine, Plus, Quote, Redo2, RefreshCcw, Reply, Search, Send, Settings, Signature, SlidersHorizontal, Smile, Star, Strikethrough, Sun, Tag, Trash2, Type, Underline, Undo2, X } from "lucide-react"
 import { api, Mailbox, MailFolder, MailLabel, MailMessage, SendPayload, DraftPayload, ScheduledSend } from "@/lib/api"
-import { cn, formatBytes, formatDate, formatDateTime } from "@/lib/utils"
+import { cn, decodeMimeHeader, formatBytes, formatDate, formatDateTime } from "@/lib/utils"
 import { applyTheme, getInitialTheme } from "@/lib/theme"
 import { useDisplayMode } from "@/lib/display-mode"
 import { Button } from "@/components/ui/button"
@@ -1306,13 +1306,13 @@ function accountInitial(name: string, email?: string) {
 }
 
 function senderDisplayName(message: MailMessage) {
-  const fromName = message.fromName?.trim()
+  const fromName = decodeMimeHeader(message.fromName?.trim() || "")
   if (fromName) return fromName
   return displayNameFromAddress(message.from)
 }
 
 function displayNameFromAddress(value: string) {
-  const text = value.trim()
+  const text = decodeMimeHeader(value.trim())
   const namedAddress = text.match(/^"?([^"<]+?)"?\s*<[^>]+>$/)
   const name = namedAddress?.[1]?.trim()
   if (name) return name
@@ -1322,8 +1322,9 @@ function displayNameFromAddress(value: string) {
 }
 
 function senderTitle(message: MailMessage) {
-  const name = message.fromName?.trim()
-  return name ? `${name} <${message.from}>` : message.from
+  const name = decodeMimeHeader(message.fromName?.trim() || "")
+  const from = decodeMimeHeader(message.from)
+  return name ? `${name} <${from}>` : from
 }
 
 function MessageRow({

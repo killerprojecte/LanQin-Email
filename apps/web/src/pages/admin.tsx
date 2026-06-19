@@ -4,7 +4,7 @@ import { useSearchParams } from "react-router-dom"
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArrowRight, CheckCircle2, Circle, Copy, Globe2, Mailbox, MoreHorizontal, Plus, RefreshCcw, Search, ShieldCheck, Trash2, Users } from "lucide-react"
 import { api, AdminUser, Alias, DNSRecord, Domain, Mailbox as MailboxType, MailMessage, MailTemplate, SystemSettings } from "@/lib/api"
-import { cn, formatBytes, formatDate } from "@/lib/utils"
+import { cn, decodeMimeHeader, formatBytes, formatDate } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -811,9 +811,9 @@ function escapeHtml(value: string) {
 }
 
 function adminSenderDisplayName(message: MailMessage) {
-  const fromName = message.fromName?.trim()
+  const fromName = decodeMimeHeader(message.fromName?.trim() || "")
   if (fromName) return fromName
-  const text = message.from.trim()
+  const text = decodeMimeHeader(message.from.trim())
   const namedAddress = text.match(/^"?([^"<]+?)"?\s*<[^>]+>$/)
   const name = namedAddress?.[1]?.trim()
   if (name) return name
@@ -822,8 +822,9 @@ function adminSenderDisplayName(message: MailMessage) {
 }
 
 function adminSenderTitle(message: MailMessage) {
-  const name = message.fromName?.trim()
-  return name ? `${name} <${message.from}>` : message.from
+  const name = decodeMimeHeader(message.fromName?.trim() || "")
+  const from = decodeMimeHeader(message.from)
+  return name ? `${name} <${from}>` : from
 }
 
 function Stat({ icon, label, value }: { icon: React.ReactNode; label: string; value: React.ReactNode }) {
