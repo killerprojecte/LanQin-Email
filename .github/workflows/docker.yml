@@ -4,13 +4,14 @@ on:
   push:
     branches:
       - main
-      - master
     tags:
       - "v*"
     paths-ignore:
       - "**/*.md"
       - "deploy/.env.example"
   pull_request:
+    branches:
+      - main
     paths-ignore:
       - "**/*.md"
       - "deploy/.env.example"
