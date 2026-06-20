@@ -748,7 +748,7 @@ export function MailPage() {
   )
 
   return (
-    <div className="h-[100dvh] overflow-hidden bg-background">
+    <div className="h-svh overflow-hidden bg-background">
       <SidebarProvider className="h-full min-h-0 w-full">
         {isMobile ? (
           <div className="flex h-full min-h-0 flex-col">
@@ -760,7 +760,7 @@ export function MailPage() {
                   </SheetTrigger>
                   <SheetContent side="left" className="w-[86vw] max-w-80 p-0 [&>button]:hidden" aria-describedby={undefined}>
                     <SheetTitle className="sr-only">邮箱导航</SheetTitle>
-                    <div className="h-[100dvh]">{sidebarContent}</div>
+                    <div className="h-svh">{sidebarContent}</div>
                   </SheetContent>
                 </Sheet>
                 <Button size="icon" variant="ghost" onClick={refreshMail} disabled={refreshing || autoRefreshing} className={cn("transition-all", (refreshing || autoRefreshing) && "bg-primary/5 text-primary")} title={autoRefreshing ? "自动刷新中" : "刷新邮件"}>
@@ -1767,7 +1767,7 @@ function ComposeDialog({ mailbox, open, draft, onOpenChange, onSent }: { mailbox
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="flex h-[100dvh] w-screen max-w-none overflow-hidden p-0 sm:h-auto sm:max-h-[92vh] sm:w-[min(96vw,82rem)]"
+        className="flex h-svh w-screen max-w-none overflow-hidden p-0 sm:h-auto sm:max-h-[92vh] sm:w-[min(96vw,82rem)]"
         onInteractOutside={(event) => event.preventDefault()}
         onPointerDownOutside={(event) => event.preventDefault()}
       >
@@ -2090,7 +2090,7 @@ function MailBodyComposer({ defaultValue, defaultHtml, files, signatureText, onC
     content: composerInitialHtml(defaultValue, defaultHtml),
     editorProps: {
       attributes: {
-        class: "mail-html w-full outline-none",
+        class: "mail-html min-h-[240px] min-w-0 flex-1 overflow-y-auto px-4 py-4 text-base leading-7 outline-none sm:min-h-[280px] sm:px-6 sm:py-5",
         "aria-label": "正文",
       },
       handlePaste(view, event) {

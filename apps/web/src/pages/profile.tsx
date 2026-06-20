@@ -225,7 +225,7 @@ export function ProfilePage() {
   )
 
   return (
-    <div className="h-[100dvh] overflow-hidden bg-background">
+    <div className="h-svh overflow-hidden bg-background">
       <SidebarProvider className="h-full min-h-0 w-full">
         {isMobile ? (
           <div className="flex h-full min-h-0 flex-col">
@@ -236,7 +236,7 @@ export function ProfilePage() {
                 </SheetTrigger>
                 <SheetContent side="left" className="w-[86vw] max-w-80 p-0 [&>button]:hidden" aria-describedby={undefined}>
                   <SheetTitle className="sr-only">个人中心导航</SheetTitle>
-                  <div className="h-[100dvh]">{sidebarContent}</div>
+                  <div className="h-svh">{sidebarContent}</div>
                 </SheetContent>
               </Sheet>
               <div className="min-w-0 flex-1 text-sm font-semibold">{tabs[tab].label}</div>
@@ -826,7 +826,7 @@ function RuleDialog({ open, onOpenChange, mailboxes, labels, pending, onCreate }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="flex h-[100dvh] w-screen max-w-none gap-0 overflow-hidden p-0 sm:h-auto sm:max-h-[92vh] sm:w-[min(94vw,84rem)]">
+      <DialogContent className="flex h-svh w-screen max-w-none gap-0 overflow-hidden p-0 sm:h-auto sm:max-h-[92vh] sm:w-[min(94vw,84rem)]">
         <DialogHeader className="border-b px-4 py-4 text-left sm:px-8 sm:py-6">
           <DialogTitle className="text-xl sm:text-2xl">新建规则</DialogTitle>
         </DialogHeader>
