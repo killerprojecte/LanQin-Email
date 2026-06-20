@@ -781,7 +781,7 @@ function AboutProjectCard() {
             </Button>
             <Button type="button" variant="outline" className="h-11 justify-start px-4 text-base font-normal" asChild>
               <a href={`${projectRepositoryUrl}/issues`} target="_blank" rel="noreferrer">
-                <Circle className="h-5 w-5 text-blue-500" />
+                <Circle className="h-5 w-5 text-muted-foreground" />
                 Issues
               </a>
             </Button>
