@@ -3,7 +3,7 @@ import DOMPurify from "dompurify"
 import { useSearchParams } from "react-router-dom"
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { ArrowRight, BookOpen, CheckCircle2, Circle, Copy, GitBranch, Github, Globe2, Mailbox, MoreHorizontal, Plus, RefreshCcw, Scale, Search, ShieldCheck, Star, Trash2, Users } from "lucide-react"
-import { api, AdminUser, Alias, DNSRecord, Domain, Mailbox as MailboxType, MailMessage, MailTemplate, SystemSettings } from "@/lib/api"
+import { api, AdminUser, Alias, DNSRecord, Domain, Mailbox as MailboxType, MailMessage, MailTemplate, PermissionGroup, PermissionInfo, SystemSettings } from "@/lib/api"
 import { cn, decodeMimeHeader, formatBytes, formatDate } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -20,14 +20,18 @@ import { Switch } from "@/components/ui/switch"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Textarea } from "@/components/ui/textarea"
 import { ConfirmDialog } from "@/components/confirm-dialog"
+import { useMe } from "@/hooks/use-me"
 import { useToast } from "@/hooks/use-toast"
+import { hasAnyPermission, hasPermission } from "@/lib/permissions"
+import type { PermissionKey } from "@/lib/api-types"
 
-type Section = "overview" | "users" | "domains" | "mailboxes" | "aliases" | "messages" | "settings"
+type Section = "overview" | "users" | "permissionGroups" | "domains" | "mailboxes" | "aliases" | "messages" | "settings"
 type PendingConfirm = { title: string; description?: string; confirmText: string; onConfirm: () => void }
 
 const sectionLabels: Record<Section, string> = {
   overview: "概览",
   users: "用户",
+  permissionGroups: "权限组",
   domains: "域名",
   mailboxes: "邮箱账号",
   aliases: "别名转发",
@@ -35,25 +39,50 @@ const sectionLabels: Record<Section, string> = {
   settings: "系统设置",
 }
 const sectionKeys = Object.keys(sectionLabels) as Section[]
+const sectionPermissions: Record<Section, PermissionKey[]> = {
+  overview: ["admin.overview.view"],
+  users: ["admin.users.view"],
+  permissionGroups: ["admin.permission_groups.view"],
+  domains: ["admin.domains.view", "admin.dns.view"],
+  mailboxes: ["admin.mailboxes.view"],
+  aliases: ["admin.aliases.view"],
+  messages: ["admin.messages.view"],
+  settings: ["admin.settings.view", "admin.templates.view"],
+}
 const projectRepositoryUrl = "https://github.com/LanQin996/LanQin-Email"
 const projectTag = import.meta.env.VITE_APP_VERSION || ""
 const projectReleaseUrl = import.meta.env.VITE_RELEASE_URL || (projectTag ? `${projectRepositoryUrl}/releases/tag/${projectTag}` : "")
 
 export function AdminPage() {
-  const overview = useQuery({ queryKey: ["admin", "overview"], queryFn: api.adminOverview })
-  const users = useQuery({ queryKey: ["admin", "users"], queryFn: api.users })
-  const domains = useQuery({ queryKey: ["admin", "domains"], queryFn: api.domains })
-  const mailboxes = useQuery({ queryKey: ["admin", "mailboxes"], queryFn: api.mailboxes })
-  const aliases = useQuery({ queryKey: ["admin", "aliases"], queryFn: api.aliases })
-  const settings = useQuery({ queryKey: ["admin", "settings"], queryFn: api.systemSettings })
+  const me = useMe()
+  const user = me.data?.user
+  const canOverview = hasPermission(user, "admin.overview.view")
+  const canUsersView = hasPermission(user, "admin.users.view")
+  const canPermissionGroupsView = hasPermission(user, "admin.permission_groups.view")
+  const canDomainsView = hasPermission(user, "admin.domains.view")
+  const canDNSView = hasPermission(user, "admin.dns.view")
+  const canMailboxesView = hasPermission(user, "admin.mailboxes.view")
+  const canAliasesView = hasPermission(user, "admin.aliases.view")
+  const canMessagesView = hasPermission(user, "admin.messages.view")
+  const canSettingsView = hasPermission(user, "admin.settings.view")
+  const canTemplatesView = hasPermission(user, "admin.templates.view")
+  const overview = useQuery({ queryKey: ["admin", "overview"], queryFn: api.adminOverview, enabled: !!user && canOverview })
+  const users = useQuery({ queryKey: ["admin", "users"], queryFn: api.users, enabled: !!user && (canUsersView || canMailboxesView) })
+  const permissionGroups = useQuery({ queryKey: ["admin", "permission-groups"], queryFn: api.permissionGroups, enabled: !!user && (canPermissionGroupsView || canUsersView) })
+  const domains = useQuery({ queryKey: ["admin", "domains"], queryFn: api.domains, enabled: !!user && (canDomainsView || canDNSView || canMailboxesView || canAliasesView || canSettingsView || canTemplatesView) })
+  const mailboxes = useQuery({ queryKey: ["admin", "mailboxes"], queryFn: api.mailboxes, enabled: !!user && (canMailboxesView || canMessagesView) })
+  const aliases = useQuery({ queryKey: ["admin", "aliases"], queryFn: api.aliases, enabled: !!user && canAliasesView })
+  const settings = useQuery({ queryKey: ["admin", "settings"], queryFn: api.systemSettings, enabled: !!user && canSettingsView })
   const [params, setParams] = useSearchParams()
 
   const domainItems = domains.data?.items || []
   const mailboxItems = mailboxes.data?.items || []
   const aliasItems = aliases.data?.items || []
   const userItems = users.data?.items || []
+  const assignablePermissionGroups = (permissionGroups.data?.items || []).filter((group) => group.id !== "pg_super_admin" && group.id !== "pg_regular_user")
+  const visibleSections = sectionKeys.filter((key) => hasAnyPermission(user, sectionPermissions[key]))
   const rawSection = params.get("section") as Section | null
-  const section: Section = rawSection && sectionKeys.includes(rawSection) ? rawSection : "overview"
+  const section: Section = rawSection && visibleSections.includes(rawSection) ? rawSection : visibleSections[0] || "overview"
 
   return (
     <ScrollArea className="h-[calc(100svh-3rem)] md:h-svh">
@@ -62,7 +91,7 @@ export function AdminPage() {
           <h1 className="text-2xl font-semibold tracking-tight">{sectionLabels[section]}</h1>
         </div>
 
-        {section === "overview" && (
+        {section === "overview" && canOverview && (
           <div className="mb-6 grid gap-4 md:grid-cols-4">
             <Stat icon={<Users />} label="用户" value={overview.data?.users || 0} />
             <Stat icon={<Globe2 />} label="域名" value={overview.data?.domains || 0} />
@@ -71,8 +100,9 @@ export function AdminPage() {
           </div>
         )}
 
-        {section === "overview" && <OverviewSection overview={overview.data} domains={domainItems} settings={settings.data} onSectionChange={(next) => setParams(next === "overview" ? {} : { section: next })} />}
-        {section === "users" && <UsersSection users={userItems} />}
+        {section === "overview" && <OverviewSection overview={overview.data} domains={domainItems} settings={settings.data} visibleSections={visibleSections} onSectionChange={(next) => setParams(next === "overview" ? {} : { section: next })} />}
+        {section === "users" && <UsersSection users={userItems} permissionGroups={assignablePermissionGroups} />}
+        {section === "permissionGroups" && <PermissionGroupsSection groups={permissionGroups.data?.items || []} catalog={permissionGroups.data?.catalog || []} />}
         {section === "domains" && <DomainsSection domains={domainItems} />}
         {section === "mailboxes" && <MailboxesSection mailboxes={mailboxItems} users={userItems} domains={domainItems} />}
         {section === "aliases" && <AliasesSection aliases={aliasItems} domains={domainItems} />}
@@ -82,8 +112,8 @@ export function AdminPage() {
     </ScrollArea>
   )
 }
-function OverviewSection({ overview, domains, settings, onSectionChange }: { overview?: { activeUsers: number; activeMailboxes: number; aliases: number; messages: number; unreadMessages: number }; domains: Domain[]; settings?: SystemSettings; onSectionChange: (section: Section) => void }) {
-  const checklist = setupChecklist(overview, domains, settings)
+function OverviewSection({ overview, domains, settings, visibleSections, onSectionChange }: { overview?: { activeUsers: number; activeMailboxes: number; aliases: number; messages: number; unreadMessages: number }; domains: Domain[]; settings?: SystemSettings; visibleSections: Section[]; onSectionChange: (section: Section) => void }) {
+  const checklist = setupChecklist(overview, domains, settings).filter((item) => visibleSections.includes(item.section))
   return (
     <div className="space-y-6">
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
@@ -142,7 +172,7 @@ function setupChecklist(overview: { activeUsers: number; activeMailboxes: number
   return [
     { key: "domain", title: "添加邮件域名", detail: hasDomain ? `${domains.length} 个域名已添加` : "先添加 example.com 这样的邮件域名", done: hasDomain, section: "domains" as Section },
     { key: "dns", title: "完成 DNS 检测", detail: dnsReady ? "至少一个域名 DNS 正常" : "配置 MX、SPF、DKIM、DMARC 后执行检测", done: dnsReady, section: "domains" as Section },
-    { key: "mailbox", title: "创建邮箱账号", detail: hasMailbox ? `${overview?.activeMailboxes || 0} 个活跃邮箱` : "给管理员或用户创建第一个邮箱", done: hasMailbox, section: "mailboxes" as Section },
+    { key: "mailbox", title: "创建邮箱账号", detail: hasMailbox ? `${overview?.activeMailboxes || 0} 个活跃邮箱` : "给超级管理员或普通用户创建第一个邮箱", done: hasMailbox, section: "mailboxes" as Section },
     { key: "smtp", title: "确认发信链路", detail: settings?.smtpHost ? `内置 Postfix：${settings.smtpHost}:${settings.smtpPort}` : "默认使用内置 Postfix", done: true, section: "settings" as Section },
     { key: "mail", title: "完成收发测试", detail: hasMail ? `${overview?.messages || 0} 封邮件已入库` : "发送或接收一封测试邮件", done: hasMail, section: "messages" as Section },
   ]
@@ -152,13 +182,17 @@ function InfoLine({ label, value }: { label: string; value: React.ReactNode }) {
   return <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2"><span>{label}</span><span className="min-w-0 truncate font-medium text-foreground">{value}</span></div>
 }
 
-function UsersSection({ users }: { users: AdminUser[] }) {
+function UsersSection({ users, permissionGroups }: { users: AdminUser[]; permissionGroups: PermissionGroup[] }) {
+  const me = useMe()
+  const user = me.data?.user
   const qc = useQueryClient()
   const { toast } = useToast()
   const [query, setQuery] = React.useState("")
   const [roleFilter, setRoleFilter] = React.useState("all")
   const [statusFilter, setStatusFilter] = React.useState("all")
   const [pendingConfirm, setPendingConfirm] = React.useState<PendingConfirm | null>(null)
+  const canCreate = hasPermission(user, "admin.users.create")
+  const canDelete = hasPermission(user, "admin.users.delete")
   const filteredUsers = users.filter((user) => {
     const keyword = query.trim().toLowerCase()
     const matchesKeyword = !keyword || [user.email, user.displayName, ...(user.mailboxes || [])].some((value) => value.toLowerCase().includes(keyword))
@@ -172,7 +206,7 @@ function UsersSection({ users }: { users: AdminUser[] }) {
       <CardHeader>
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <CardTitle>用户管理</CardTitle>
-          <CreateUserDialog />
+          {canCreate && <CreateUserDialog permissionGroups={permissionGroups} />}
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -185,7 +219,7 @@ function UsersSection({ users }: { users: AdminUser[] }) {
             <SelectTrigger className="lg:w-36"><SelectValue /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">全部角色</SelectItem>
-              <SelectItem value="admin">管理员</SelectItem>
+              <SelectItem value="admin">超级管理员</SelectItem>
               <SelectItem value="user">普通用户</SelectItem>
             </SelectContent>
           </Select>
@@ -206,20 +240,21 @@ function UsersSection({ users }: { users: AdminUser[] }) {
                   <div className="truncate font-medium">{user.displayName}</div>
                   <div className="truncate text-xs text-muted-foreground">{user.email}</div>
                 </div>
-                <UserActions user={user} onDelete={() => setPendingConfirm({ title: "删除用户？", description: `将删除 ${user.email} 及其关联数据。`, confirmText: "删除用户", onConfirm: () => remove.mutate(user.id) })} />
+                <UserActions user={user} permissionGroups={permissionGroups} onDelete={canDelete ? () => setPendingConfirm({ title: "删除用户？", description: `将删除 ${user.email} 及其关联数据。`, confirmText: "删除用户", onConfirm: () => remove.mutate(user.id) }) : undefined} />
               </div>
               <div className="mt-3 flex flex-wrap gap-2">
-                <Badge variant={user.role === "admin" ? "default" : "secondary"}>{user.role === "admin" ? "管理员" : "普通用户"}</Badge>
+                <RoleBadge user={user} />
                 <Badge variant={user.disabled ? "secondary" : "default"}>{user.disabled ? "停用" : "正常"}</Badge>
                 <Badge variant="outline">{new Date(user.createdAt).toLocaleDateString()}</Badge>
               </div>
+              <div className="mt-3"><UserPermissionGroupsCell user={user} /></div>
               <div className="mt-3"><UserMailboxCell user={user} /></div>
             </div>
           ))}
         </div>
         <div className="hidden md:block">
           <Table>
-            <TableHeader><TableRow><TableHead>用户</TableHead><TableHead>角色</TableHead><TableHead>邮箱</TableHead><TableHead>状态</TableHead><TableHead>创建时间</TableHead><TableHead className="w-16"></TableHead></TableRow></TableHeader>
+            <TableHeader><TableRow><TableHead>用户</TableHead><TableHead>身份</TableHead><TableHead>权限组</TableHead><TableHead>邮箱</TableHead><TableHead>状态</TableHead><TableHead>创建时间</TableHead><TableHead className="w-16"></TableHead></TableRow></TableHeader>
             <TableBody>
               {filteredUsers.map((user) => (
                 <TableRow key={user.id}>
@@ -227,11 +262,12 @@ function UsersSection({ users }: { users: AdminUser[] }) {
                     <div className="font-medium">{user.displayName}</div>
                     <div className="text-xs text-muted-foreground">{user.email}</div>
                   </TableCell>
-                  <TableCell><Badge variant={user.role === "admin" ? "default" : "secondary"}>{user.role === "admin" ? "管理员" : "普通用户"}</Badge></TableCell>
+                  <TableCell><RoleBadge user={user} /></TableCell>
+                  <TableCell><UserPermissionGroupsCell user={user} /></TableCell>
                   <TableCell><UserMailboxCell user={user} /></TableCell>
                   <TableCell><Badge variant={user.disabled ? "secondary" : "default"}>{user.disabled ? "停用" : "正常"}</Badge></TableCell>
                   <TableCell className="text-muted-foreground">{new Date(user.createdAt).toLocaleDateString()}</TableCell>
-                  <TableCell><UserActions user={user} onDelete={() => setPendingConfirm({ title: "删除用户？", description: `将删除 ${user.email} 及其关联数据。`, confirmText: "删除用户", onConfirm: () => remove.mutate(user.id) })} /></TableCell>
+                  <TableCell><UserActions user={user} permissionGroups={permissionGroups} onDelete={canDelete ? () => setPendingConfirm({ title: "删除用户？", description: `将删除 ${user.email} 及其关联数据。`, confirmText: "删除用户", onConfirm: () => remove.mutate(user.id) }) : undefined} /></TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -244,10 +280,215 @@ function UsersSection({ users }: { users: AdminUser[] }) {
   )
 }
 
+function PermissionGroupsSection({ groups, catalog }: { groups: PermissionGroup[]; catalog: PermissionInfo[] }) {
+  const me = useMe()
+  const user = me.data?.user
+  const qc = useQueryClient()
+  const { toast } = useToast()
+  const [query, setQuery] = React.useState("")
+  const [editing, setEditing] = React.useState<PermissionGroup | null>(null)
+  const [pendingConfirm, setPendingConfirm] = React.useState<PendingConfirm | null>(null)
+  const canCreate = hasPermission(user, "admin.permission_groups.create")
+  const canUpdate = hasPermission(user, "admin.permission_groups.update")
+  const canDelete = hasPermission(user, "admin.permission_groups.delete")
+  const remove = useMutation({
+    mutationFn: api.deletePermissionGroup,
+    onSuccess: () => {
+      setPendingConfirm(null)
+      invalidateAdmin(qc)
+      toast({ title: "权限组已删除" })
+    },
+    onError: (e) => toast({ title: "删除失败", description: e.message }),
+  })
+  const filtered = groups.filter((group) => {
+    const keyword = query.trim().toLowerCase()
+    if (!keyword) return true
+    return [group.name, group.description, ...group.permissions].some((value) => value.toLowerCase().includes(keyword))
+  })
+  return (
+    <Card>
+      <CardHeader>
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <CardTitle>权限组管理</CardTitle>
+          {canCreate && <PermissionGroupDialog catalog={catalog} />}
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="relative">
+          <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+          <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索权限组、说明或权限键" className="pl-9" />
+        </div>
+        <div className="grid gap-3 lg:grid-cols-2">
+          {filtered.map((group) => (
+            <div key={group.id} className="rounded-lg border p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="font-medium">{group.name}</div>
+                    {group.system && <Badge variant="outline">系统组</Badge>}
+                    {!group.system && <Badge variant="secondary">自定义</Badge>}
+                    <Badge variant="outline">{group.userCount} 人</Badge>
+                  </div>
+                  <div className="mt-1 line-clamp-2 text-sm text-muted-foreground">{group.description || "未填写说明"}</div>
+                </div>
+                {(canUpdate || canDelete) && <DropdownMenu>
+                  <DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem disabled={group.system || !canUpdate} onSelect={() => setEditing(group)}>编辑权限组</DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      className="text-destructive"
+                      disabled={group.system || group.userCount > 0 || !canDelete}
+                      onSelect={() => setPendingConfirm({ title: "删除权限组？", description: `${group.name} 删除后不能再分配给用户。`, confirmText: "删除权限组", onConfirm: () => remove.mutate(group.id) })}
+                    >
+                      删除权限组
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>}
+              </div>
+              <PermissionBadges permissions={group.permissions} catalog={catalog} />
+            </div>
+          ))}
+        </div>
+        {filtered.length === 0 && <Empty text="暂无匹配的权限组" />}
+      </CardContent>
+      {editing && <PermissionGroupDialog group={editing} catalog={catalog} open={!!editing} onOpenChange={(open) => { if (!open) setEditing(null) }} />}
+      <ConfirmDialog open={!!pendingConfirm} title={pendingConfirm?.title || ""} description={pendingConfirm?.description} confirmText={pendingConfirm?.confirmText || "删除"} destructive pending={remove.isPending} onOpenChange={(open) => { if (!open) setPendingConfirm(null) }} onConfirm={() => pendingConfirm?.onConfirm()} />
+    </Card>
+  )
+}
+
+function PermissionGroupDialog({ group, catalog, open, onOpenChange }: { group?: PermissionGroup; catalog: PermissionInfo[]; open?: boolean; onOpenChange?: (open: boolean) => void }) {
+  const qc = useQueryClient()
+  const { toast } = useToast()
+  const [internalOpen, setInternalOpen] = React.useState(false)
+  const dialogOpen = open ?? internalOpen
+  const setDialogOpen = onOpenChange ?? setInternalOpen
+  const [permissions, setPermissions] = React.useState<PermissionKey[]>(group?.permissions || [])
+  React.useEffect(() => {
+    if (dialogOpen) setPermissions(group?.permissions || [])
+  }, [dialogOpen, group])
+  const mutation = useMutation({
+    mutationFn: (form: FormData) => {
+      const payload = {
+        name: String(form.get("name") || ""),
+        description: String(form.get("description") || ""),
+        permissions,
+      }
+      return group ? api.updatePermissionGroup(group.id, payload) : api.createPermissionGroup(payload)
+    },
+    onSuccess: () => {
+      invalidateAdmin(qc)
+      setDialogOpen(false)
+      toast({ title: group ? "权限组已更新" : "权限组已创建" })
+    },
+    onError: (e) => toast({ title: group ? "更新失败" : "创建失败", description: e.message }),
+  })
+  const trigger = group ? null : (
+    <DialogTrigger asChild>
+      <Button size="sm"><Plus className="h-4 w-4" />权限组</Button>
+    </DialogTrigger>
+  )
+  return (
+    <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+      {trigger}
+      <DialogContent className="max-h-[86vh] overflow-y-auto sm:max-w-3xl">
+        <DialogHeader><DialogTitle>{group ? "编辑权限组" : "创建权限组"}</DialogTitle></DialogHeader>
+        <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); mutation.mutate(new FormData(event.currentTarget)) }}>
+          <div className="grid gap-4 md:grid-cols-2">
+            <Field name="name" label="名称" defaultValue={group?.name || ""} placeholder="例如：客服主管" />
+            <Field name="description" label="说明" defaultValue={group?.description || ""} required={false} />
+          </div>
+          <PermissionPicker catalog={catalog} value={permissions} onChange={setPermissions} />
+          <DialogFooter><Button disabled={mutation.isPending}>{mutation.isPending ? "保存中..." : "保存"}</Button></DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function PermissionPicker({ catalog, value, onChange }: { catalog: PermissionInfo[]; value: PermissionKey[]; onChange: (value: PermissionKey[]) => void }) {
+  const grouped = groupPermissionCatalog(catalog)
+  function toggle(permission: PermissionKey, checked: boolean) {
+    onChange(checked ? Array.from(new Set([...value, permission])) : value.filter((item) => item !== permission))
+  }
+  function toggleCategory(items: PermissionInfo[], checked: boolean) {
+    const keys = items.map((item) => item.key)
+    onChange(checked ? Array.from(new Set([...value, ...keys])) : value.filter((item) => !keys.includes(item)))
+  }
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between gap-3">
+        <Label>菜单与操作权限</Label>
+        <Badge variant="outline">{value.length} 项</Badge>
+      </div>
+      <div className="space-y-3">
+        {grouped.map(({ category, items }) => {
+          const allChecked = items.every((item) => value.includes(item.key))
+          return (
+            <div key={category} className="rounded-lg border">
+              <div className="flex items-center justify-between gap-3 border-b px-3 py-2">
+                <label className="flex items-center gap-2 font-medium">
+                  <Checkbox checked={allChecked} onCheckedChange={(next) => toggleCategory(items, next === true)} />
+                  {category}
+                </label>
+                <span className="text-xs text-muted-foreground">{items.filter((item) => value.includes(item.key)).length}/{items.length}</span>
+              </div>
+              <div className="grid gap-2 p-3 md:grid-cols-2">
+                {items.map((item) => (
+                  <label key={item.key} className="flex min-h-16 items-start gap-3 rounded-md border px-3 py-2">
+                    <Checkbox checked={value.includes(item.key)} onCheckedChange={(next) => toggle(item.key, next === true)} />
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium">{item.label}</span>
+                      <span className="line-clamp-2 text-xs text-muted-foreground">{item.description}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function PermissionBadges({ permissions, catalog }: { permissions: PermissionKey[]; catalog: PermissionInfo[] }) {
+  const labelByKey = new Map(catalog.map((item) => [item.key, item.label]))
+  if (permissions.length === 0) return <div className="mt-3 text-sm text-muted-foreground">无后台权限</div>
+  return (
+    <div className="mt-3 flex flex-wrap gap-1.5">
+      {permissions.slice(0, 10).map((permission) => (
+        <Badge key={permission} variant="outline" className="font-normal">{labelByKey.get(permission) || permission}</Badge>
+      ))}
+      {permissions.length > 10 && <Badge variant="secondary">+{permissions.length - 10}</Badge>}
+    </div>
+  )
+}
+
+function groupPermissionCatalog(catalog: PermissionInfo[]) {
+  const order: string[] = []
+  const grouped = new Map<string, PermissionInfo[]>()
+  for (const item of catalog) {
+    if (!grouped.has(item.category)) {
+      grouped.set(item.category, [])
+      order.push(item.category)
+    }
+    grouped.get(item.category)!.push(item)
+  }
+  return order.map((category) => ({ category, items: grouped.get(category)! }))
+}
+
 function DomainsSection({ domains }: { domains: Domain[] }) {
+  const me = useMe()
+  const user = me.data?.user
   const qc = useQueryClient()
   const { toast } = useToast()
   const [pendingConfirm, setPendingConfirm] = React.useState<PendingConfirm | null>(null)
+  const canCreate = hasPermission(user, "admin.domains.create")
+  const canUpdate = hasPermission(user, "admin.domains.update")
+  const canDelete = hasPermission(user, "admin.domains.delete")
+  const canViewDNS = hasPermission(user, "admin.dns.view")
   const update = useMutation({ mutationFn: ({ id, status }: { id: string; status: string }) => api.updateDomain(id, { status }), onSuccess: () => { invalidateAdmin(qc); toast({ title: "域名已更新" }) }, onError: (e) => toast({ title: "更新失败", description: e.message }) })
   const remove = useMutation({ mutationFn: api.deleteDomain, onSuccess: () => { setPendingConfirm(null); invalidateAdmin(qc); toast({ title: "域名已删除" }) }, onError: (e) => toast({ title: "删除失败", description: e.message }) })
   return (
@@ -255,7 +496,7 @@ function DomainsSection({ domains }: { domains: Domain[] }) {
       <CardHeader>
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <CardTitle>域名管理</CardTitle>
-          <CreateDomainDialog />
+          {canCreate && <CreateDomainDialog />}
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -268,9 +509,9 @@ function DomainsSection({ domains }: { domains: Domain[] }) {
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant={domain.status === "active" ? "default" : "secondary"}>{domain.status === "active" ? "启用" : "停用"}</Badge>
               <Badge variant={domain.dnsStatus === "ok" ? "default" : "secondary"}>{domain.dnsStatus === "ok" ? "DNS 正常" : domain.dnsStatus}</Badge>
-              <DomainDNSDialog domain={domain} />
-              <Button variant="outline" size="sm" onClick={() => update.mutate({ id: domain.id, status: domain.status === "active" ? "disabled" : "active" })}>{domain.status === "active" ? "停用" : "启用"}</Button>
-              <Button variant="outline" size="sm" onClick={() => setPendingConfirm({ title: "删除域名？", description: `将删除 ${domain.name}，相关邮箱、别名和邮件也可能受影响。`, confirmText: "删除域名", onConfirm: () => remove.mutate(domain.id) })}><Trash2 className="h-4 w-4" />删除</Button>
+              {canViewDNS && <DomainDNSDialog domain={domain} />}
+              {canUpdate && <Button variant="outline" size="sm" onClick={() => update.mutate({ id: domain.id, status: domain.status === "active" ? "disabled" : "active" })}>{domain.status === "active" ? "停用" : "启用"}</Button>}
+              {canDelete && <Button variant="outline" size="sm" onClick={() => setPendingConfirm({ title: "删除域名？", description: `将删除 ${domain.name}，相关邮箱、别名和邮件也可能受影响。`, confirmText: "删除域名", onConfirm: () => remove.mutate(domain.id) })}><Trash2 className="h-4 w-4" />删除</Button>}
             </div>
           </div>
         ))}
@@ -296,16 +537,21 @@ function DomainDNSDialog({ domain }: { domain: Domain }) {
 }
 
 function MailboxesSection({ mailboxes, users, domains }: { mailboxes: MailboxType[]; users: AdminUser[]; domains: Domain[] }) {
+  const me = useMe()
+  const user = me.data?.user
   const qc = useQueryClient()
   const { toast } = useToast()
   const [pendingConfirm, setPendingConfirm] = React.useState<PendingConfirm | null>(null)
+  const canCreate = hasPermission(user, "admin.mailboxes.create")
+  const canUpdate = hasPermission(user, "admin.mailboxes.update")
+  const canDelete = hasPermission(user, "admin.mailboxes.delete")
   const remove = useMutation({ mutationFn: api.deleteMailbox, onSuccess: () => { setPendingConfirm(null); invalidateAdmin(qc); toast({ title: "邮箱已删除" }) }, onError: (e) => toast({ title: "删除失败", description: e.message }) })
   return (
     <Card>
       <CardHeader>
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <CardTitle>邮箱账号管理</CardTitle>
-          <CreateMailboxDialog domains={domains} users={users} />
+          {canCreate && <CreateMailboxDialog domains={domains} users={users} />}
         </div>
       </CardHeader>
       <CardContent>
@@ -317,7 +563,7 @@ function MailboxesSection({ mailboxes, users, domains }: { mailboxes: MailboxTyp
                   <div className="truncate font-medium">{mailbox.address}</div>
                   <div className="truncate text-xs text-muted-foreground">{mailbox.userEmail || mailbox.userId}</div>
                 </div>
-                <MailboxActions mailbox={mailbox} users={users} onDelete={() => setPendingConfirm({ title: "删除邮箱？", description: `将删除 ${mailbox.address} 和其中邮件。`, confirmText: "删除邮箱", onConfirm: () => remove.mutate(mailbox.id) })} />
+                <MailboxActions mailbox={mailbox} users={users} canUpdate={canUpdate} onDelete={canDelete ? () => setPendingConfirm({ title: "删除邮箱？", description: `将删除 ${mailbox.address} 和其中邮件。`, confirmText: "删除邮箱", onConfirm: () => remove.mutate(mailbox.id) }) : undefined} />
               </div>
               <div className="mt-3 flex flex-wrap gap-2">
                 <Badge variant={mailbox.status === "active" ? "default" : "secondary"}>{mailbox.status === "active" ? "启用" : "停用"}</Badge>
@@ -338,7 +584,7 @@ function MailboxesSection({ mailboxes, users, domains }: { mailboxes: MailboxTyp
                   <TableCell>{mailbox.displayName}</TableCell>
                   <TableCell>{mailbox.quotaMb} MB</TableCell>
                   <TableCell><Badge variant={mailbox.status === "active" ? "default" : "secondary"}>{mailbox.status === "active" ? "启用" : "停用"}</Badge></TableCell>
-                  <TableCell><MailboxActions mailbox={mailbox} users={users} onDelete={() => setPendingConfirm({ title: "删除邮箱？", description: `将删除 ${mailbox.address} 和其中邮件。`, confirmText: "删除邮箱", onConfirm: () => remove.mutate(mailbox.id) })} /></TableCell>
+                  <TableCell><MailboxActions mailbox={mailbox} users={users} canUpdate={canUpdate} onDelete={canDelete ? () => setPendingConfirm({ title: "删除邮箱？", description: `将删除 ${mailbox.address} 和其中邮件。`, confirmText: "删除邮箱", onConfirm: () => remove.mutate(mailbox.id) }) : undefined} /></TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -352,9 +598,14 @@ function MailboxesSection({ mailboxes, users, domains }: { mailboxes: MailboxTyp
 }
 
 function AliasesSection({ aliases, domains }: { aliases: Alias[]; domains: Domain[] }) {
+  const me = useMe()
+  const user = me.data?.user
   const qc = useQueryClient()
   const { toast } = useToast()
   const [pendingConfirm, setPendingConfirm] = React.useState<PendingConfirm | null>(null)
+  const canCreate = hasPermission(user, "admin.aliases.create")
+  const canUpdate = hasPermission(user, "admin.aliases.update")
+  const canDelete = hasPermission(user, "admin.aliases.delete")
   const update = useMutation({ mutationFn: ({ id, payload }: { id: string; payload: { source: string; destination: string; enabled: boolean } }) => api.updateAlias(id, payload), onSuccess: () => { invalidateAdmin(qc); toast({ title: "别名已更新" }) }, onError: (e) => toast({ title: "更新失败", description: e.message }) })
   const remove = useMutation({ mutationFn: api.deleteAlias, onSuccess: () => { setPendingConfirm(null); invalidateAdmin(qc); toast({ title: "别名已删除" }) }, onError: (e) => toast({ title: "删除失败", description: e.message }) })
   return (
@@ -362,7 +613,7 @@ function AliasesSection({ aliases, domains }: { aliases: Alias[]; domains: Domai
       <CardHeader>
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <CardTitle>别名/转发管理</CardTitle>
-          <CreateAliasDialog domains={domains} />
+          {canCreate && <CreateAliasDialog domains={domains} />}
         </div>
       </CardHeader>
       <CardContent>
@@ -374,7 +625,7 @@ function AliasesSection({ aliases, domains }: { aliases: Alias[]; domains: Domai
                   <div className="truncate font-medium">{alias.source}</div>
                   <div className="truncate text-xs text-muted-foreground">{alias.destination}</div>
                 </div>
-                <AliasActions alias={alias} onToggle={() => update.mutate({ id: alias.id, payload: { source: alias.source, destination: alias.destination, enabled: !alias.enabled } })} onDelete={() => setPendingConfirm({ title: "删除别名？", description: `${alias.source} 将不再转发到 ${alias.destination}。`, confirmText: "删除别名", onConfirm: () => remove.mutate(alias.id) })} />
+                <AliasActions alias={alias} onToggle={canUpdate ? () => update.mutate({ id: alias.id, payload: { source: alias.source, destination: alias.destination, enabled: !alias.enabled } }) : undefined} onDelete={canDelete ? () => setPendingConfirm({ title: "删除别名？", description: `${alias.source} 将不再转发到 ${alias.destination}。`, confirmText: "删除别名", onConfirm: () => remove.mutate(alias.id) }) : undefined} />
               </div>
               <div className="mt-3 flex flex-wrap gap-2">
                 <Badge variant={alias.enabled ? "default" : "secondary"}>{alias.enabled ? "启用" : "停用"}</Badge>
@@ -393,7 +644,7 @@ function AliasesSection({ aliases, domains }: { aliases: Alias[]; domains: Domai
                   <TableCell>{alias.destination}</TableCell>
                   <TableCell className="text-muted-foreground">{domains.find((d) => d.id === alias.domainId)?.name || alias.domainId}</TableCell>
                   <TableCell><Badge variant={alias.enabled ? "default" : "secondary"}>{alias.enabled ? "启用" : "停用"}</Badge></TableCell>
-                  <TableCell><AliasActions alias={alias} onToggle={() => update.mutate({ id: alias.id, payload: { source: alias.source, destination: alias.destination, enabled: !alias.enabled } })} onDelete={() => setPendingConfirm({ title: "删除别名？", description: `${alias.source} 将不再转发到 ${alias.destination}。`, confirmText: "删除别名", onConfirm: () => remove.mutate(alias.id) })} /></TableCell>
+                  <TableCell><AliasActions alias={alias} onToggle={canUpdate ? () => update.mutate({ id: alias.id, payload: { source: alias.source, destination: alias.destination, enabled: !alias.enabled } }) : undefined} onDelete={canDelete ? () => setPendingConfirm({ title: "删除别名？", description: `${alias.source} 将不再转发到 ${alias.destination}。`, confirmText: "删除别名", onConfirm: () => remove.mutate(alias.id) }) : undefined} /></TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -534,9 +785,17 @@ function AdminMessagesSection({ mailboxes }: { mailboxes: MailboxType[] }) {
 }
 
 function SystemSettingsSection({ settings, domains }: { settings?: SystemSettings; domains: Domain[] }) {
+  const me = useMe()
+  const user = me.data?.user
   const qc = useQueryClient()
   const { toast } = useToast()
-  const templates = useQuery({ queryKey: ["admin", "mail-templates"], queryFn: api.mailTemplates })
+  const canSettingsView = hasPermission(user, "admin.settings.view")
+  const canUpdateSettings = hasPermission(user, "admin.settings.update")
+  const canTestSMTP = hasPermission(user, "admin.settings.test_smtp")
+  const canViewTemplates = hasPermission(user, "admin.templates.view")
+  const canUpdateTemplates = hasPermission(user, "admin.templates.update")
+  const canResetTemplates = hasPermission(user, "admin.templates.reset")
+  const templates = useQuery({ queryKey: ["admin", "mail-templates"], queryFn: api.mailTemplates, enabled: canViewTemplates })
   const [settingsTab, setSettingsTab] = React.useState<"base" | "smtp" | "storage" | "mail" | "templates" | "security" | "about">("base")
   const [smtpRequireTls, setSmtpRequireTls] = React.useState(false)
   const [allowInsecureHttp, setAllowInsecureHttp] = React.useState(true)
@@ -617,16 +876,22 @@ function SystemSettingsSection({ settings, domains }: { settings?: SystemSetting
     settings.reservedMailboxPrefixes,
   ].join("|") : "loading"
   const tabs: { key: typeof settingsTab; label: string }[] = [
-    { key: "base", label: "基础" },
-    { key: "smtp", label: "SMTP" },
-    { key: "storage", label: "存储" },
-    { key: "mail", label: "邮件" },
-    { key: "templates", label: "模板" },
-    { key: "security", label: "安全" },
+    ...(canSettingsView ? [
+      { key: "base" as const, label: "基础" },
+      { key: "smtp" as const, label: "SMTP" },
+      { key: "storage" as const, label: "存储" },
+      { key: "mail" as const, label: "邮件" },
+    ] : []),
+    ...(canViewTemplates ? [{ key: "templates" as const, label: "模板" }] : []),
+    ...(canSettingsView ? [{ key: "security" as const, label: "安全" }] : []),
     { key: "about", label: "关于" },
   ]
+  React.useEffect(() => {
+    if (tabs.some((tab) => tab.key === settingsTab)) return
+    setSettingsTab(tabs[0]?.key || "about")
+  }, [settingsTab, tabs])
   return (
-    <form key={formKey} onSubmit={(event) => { event.preventDefault(); save.mutate(new FormData(event.currentTarget)) }} className="space-y-6">
+    <form key={formKey} onSubmit={(event) => { event.preventDefault(); if (canUpdateSettings) save.mutate(new FormData(event.currentTarget)) }} className="space-y-6">
       <div className="flex flex-wrap gap-2 rounded-lg border bg-card p-2">
         {tabs.map((tab) => (
           <Button key={tab.key} type="button" variant={settingsTab === tab.key ? "default" : "ghost"} size="sm" onClick={() => setSettingsTab(tab.key)}>
@@ -652,7 +917,7 @@ function SystemSettingsSection({ settings, domains }: { settings?: SystemSetting
             <div>
               <CardTitle>发信通道</CardTitle>
             </div>
-            <TestSMTPDialog disabled={!settings} />
+            {canTestSMTP && <TestSMTPDialog disabled={!settings} />}
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -721,7 +986,7 @@ function SystemSettingsSection({ settings, domains }: { settings?: SystemSetting
         </CardContent>
       </Card>}
 
-      {settingsTab === "templates" && <MailTemplatesPanel templates={templates.data?.items || []} loading={templates.isLoading} />}
+      {settingsTab === "templates" && canViewTemplates && <MailTemplatesPanel templates={templates.data?.items || []} loading={templates.isLoading} canUpdate={canUpdateTemplates} canReset={canResetTemplates} />}
 
       {settingsTab === "security" && <Card>
         <CardHeader><CardTitle>安全设置</CardTitle></CardHeader>
@@ -742,7 +1007,7 @@ function SystemSettingsSection({ settings, domains }: { settings?: SystemSetting
 
       {settingsTab === "about" && <AboutProjectCard />}
 
-      {settingsTab !== "about" && <div className="flex justify-end">
+      {settingsTab !== "about" && canUpdateSettings && <div className="flex justify-end">
         <Button disabled={save.isPending || !settings}>{save.isPending ? "保存中..." : "保存设置"}</Button>
       </div>}
     </form>
@@ -852,7 +1117,7 @@ function TestSMTPDialog({ disabled }: { disabled?: boolean }) {
   )
 }
 
-function MailTemplatesPanel({ templates, loading }: { templates: MailTemplate[]; loading: boolean }) {
+function MailTemplatesPanel({ templates, loading, canUpdate, canReset }: { templates: MailTemplate[]; loading: boolean; canUpdate: boolean; canReset: boolean }) {
   const qc = useQueryClient()
   const { toast } = useToast()
   const [selectedKey, setSelectedKey] = React.useState("")
@@ -906,14 +1171,14 @@ function MailTemplatesPanel({ templates, loading }: { templates: MailTemplate[];
             <Textarea value={bodyHtml} onChange={(event) => setBodyHtml(event.target.value)} className="min-h-64 font-mono text-sm" />
           </div>
         </div>
-        <div className="flex justify-end gap-2">
-          <Button type="button" variant="outline" disabled={reset.isPending || save.isPending} onClick={() => reset.mutate()}>
+        {(canUpdate || canReset) && <div className="flex justify-end gap-2">
+          {canReset && <Button type="button" variant="outline" disabled={reset.isPending || save.isPending} onClick={() => reset.mutate()}>
             {reset.isPending ? "恢复中..." : "恢复默认"}
-          </Button>
-          <Button type="button" disabled={save.isPending || reset.isPending} onClick={() => save.mutate()}>
+          </Button>}
+          {canUpdate && <Button type="button" disabled={save.isPending || reset.isPending} onClick={() => save.mutate()}>
             {save.isPending ? "保存中..." : "保存模板"}
-          </Button>
-        </div>
+          </Button>}
+        </div>}
       </CardContent>
     </Card>
   )
@@ -1004,31 +1269,96 @@ function UserMailboxCell({ user }: { user: AdminUser }) {
   )
 }
 
-function UserActions({ user, onDelete }: { user: AdminUser; onDelete: () => void }) {
+function UserPermissionGroupsCell({ user }: { user: AdminUser }) {
+  const groups = user.permissionGroups || []
+  if (groups.length === 0) return <span className="text-muted-foreground">普通用户</span>
+  return (
+    <div className="flex max-w-md flex-wrap gap-1">
+      {groups.map((group) => (
+        <Badge key={group.id} variant={group.id === "pg_super_admin" ? "default" : "secondary"} className="font-normal">
+          {group.name}
+        </Badge>
+      ))}
+    </div>
+  )
+}
+
+function assignableUserGroupIDs(user: AdminUser) {
+  return (user.permissionGroupIds || []).filter((id) => id !== "pg_super_admin" && id !== "pg_regular_user")
+}
+
+function PermissionGroupPicker({ groups, value, onChange }: { groups: PermissionGroup[]; value: string[]; onChange: (value: string[]) => void }) {
+  function toggle(groupID: string, checked: boolean) {
+    onChange(checked ? Array.from(new Set([...value, groupID])) : value.filter((id) => id !== groupID))
+  }
+  return (
+    <div className="space-y-2">
+      <Label>权限组</Label>
+      <div className="grid gap-2 md:grid-cols-2">
+        {groups.map((group) => {
+          const checked = value.includes(group.id)
+          return (
+            <label key={group.id} className="flex min-h-16 items-start gap-3 rounded-md border px-3 py-2">
+              <Checkbox checked={checked} onCheckedChange={(next) => toggle(group.id, next === true)} />
+              <span className="min-w-0">
+                <span className="block text-sm font-medium">{group.name}</span>
+                <span className="line-clamp-2 text-xs text-muted-foreground">{group.description}</span>
+              </span>
+            </label>
+          )
+        })}
+      </div>
+      {groups.length === 0 && <Empty text="暂无可分配权限组" />}
+    </div>
+  )
+}
+
+function RoleBadge({ user }: { user: AdminUser }) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      <Badge variant={user.role === "admin" ? "default" : "secondary"}>{user.role === "admin" ? "超级管理员" : "普通用户"}</Badge>
+      {user.protected && <Badge variant="outline">默认账号</Badge>}
+    </div>
+  )
+}
+
+function UserActions({ user, permissionGroups, onDelete }: { user: AdminUser; permissionGroups: PermissionGroup[]; onDelete?: () => void }) {
+  const me = useMe()
+  const currentUser = me.data?.user
   const qc = useQueryClient()
   const { toast } = useToast()
   const [editOpen, setEditOpen] = React.useState(false)
   const [passwordOpen, setPasswordOpen] = React.useState(false)
+  const canUpdate = hasPermission(currentUser, "admin.users.update")
+  const canResetPassword = hasPermission(currentUser, "admin.users.reset_password")
   const update = useMutation({
-    mutationFn: (payload: { displayName: string; role: "admin" | "user"; disabled: boolean }) => api.updateUser(user.id, payload),
+    mutationFn: (payload: { displayName: string; role: "admin" | "user"; disabled: boolean; permissionGroupIds?: string[] }) => api.updateUser(user.id, payload),
     onSuccess: () => { invalidateAdmin(qc); toast({ title: "用户已更新" }) },
     onError: (e) => toast({ title: "更新失败", description: e.message }),
   })
   function quickPatch(patch: Partial<{ role: "admin" | "user"; disabled: boolean }>) {
-    update.mutate({ displayName: user.displayName, role: patch.role || user.role, disabled: patch.disabled ?? user.disabled })
+    const role = patch.role || user.role
+    update.mutate({
+      displayName: user.displayName,
+      role,
+      disabled: patch.disabled ?? user.disabled,
+      permissionGroupIds: role === "user" ? assignableUserGroupIDs(user) : [],
+    })
   }
-  return <><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setEditOpen(true)}>编辑用户</DropdownMenuItem><DropdownMenuItem onSelect={() => setPasswordOpen(true)}>重置密码</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => quickPatch({ disabled: !user.disabled })}>{user.disabled ? "启用用户" : "停用用户"}</DropdownMenuItem><DropdownMenuItem onSelect={() => quickPatch({ role: user.role === "admin" ? "user" : "admin" })}>{user.role === "admin" ? "设为普通用户" : "设为管理员"}</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive" onSelect={onDelete}>删除用户</DropdownMenuItem></DropdownMenuContent></DropdownMenu><EditUserDialog user={user} open={editOpen} onOpenChange={setEditOpen} /><ResetPasswordDialog user={user} open={passwordOpen} onOpenChange={setPasswordOpen} /></>
+  if (!canUpdate && !canResetPassword && !onDelete) return null
+  return <><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{canUpdate && <DropdownMenuItem onSelect={() => setEditOpen(true)}>编辑用户</DropdownMenuItem>}{canResetPassword && <DropdownMenuItem onSelect={() => setPasswordOpen(true)}>重置密码</DropdownMenuItem>}{!user.protected && canUpdate && <><DropdownMenuSeparator /><DropdownMenuItem onSelect={() => quickPatch({ disabled: !user.disabled })}>{user.disabled ? "启用用户" : "停用用户"}</DropdownMenuItem><DropdownMenuItem onSelect={() => quickPatch({ role: user.role === "admin" ? "user" : "admin" })}>{user.role === "admin" ? "设为普通用户" : "设为超级管理员"}</DropdownMenuItem></>}{!user.protected && onDelete && <><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive" onSelect={onDelete}>删除用户</DropdownMenuItem></>}</DropdownMenuContent></DropdownMenu>{canUpdate && <EditUserDialog user={user} permissionGroups={permissionGroups} open={editOpen} onOpenChange={setEditOpen} />}{canResetPassword && <ResetPasswordDialog user={user} open={passwordOpen} onOpenChange={setPasswordOpen} />}</>
 }
 
-function CreateUserDialog() {
+function CreateUserDialog({ permissionGroups }: { permissionGroups: PermissionGroup[] }) {
   const qc = useQueryClient()
   const { toast } = useToast()
   const [open, setOpen] = React.useState(false)
   const [role, setRole] = React.useState<"admin" | "user">("user")
   const [status, setStatus] = React.useState("active")
+  const [permissionGroupIds, setPermissionGroupIds] = React.useState<string[]>([])
   const create = useMutation({
-    mutationFn: (form: FormData) => api.createUser({ email: String(form.get("email") || ""), displayName: String(form.get("displayName") || ""), password: String(form.get("password") || ""), role, disabled: status === "disabled" }),
-    onSuccess: () => { invalidateAdmin(qc); setOpen(false); toast({ title: "用户已创建" }) },
+    mutationFn: (form: FormData) => api.createUser({ email: String(form.get("email") || ""), displayName: String(form.get("displayName") || ""), password: String(form.get("password") || ""), role, disabled: status === "disabled", permissionGroupIds: role === "user" ? permissionGroupIds : [] }),
+    onSuccess: () => { invalidateAdmin(qc); setOpen(false); setPermissionGroupIds([]); toast({ title: "用户已创建" }) },
     onError: (e) => toast({ title: "创建失败", description: e.message }),
   })
   return (
@@ -1041,9 +1371,10 @@ function CreateUserDialog() {
           <Field name="displayName" label="显示名称" placeholder="用户名称" />
           <Field name="password" label="初始密码" type="password" minLength={8} />
           <div className="grid grid-cols-2 gap-3">
-            <SelectField label="角色" value={role} onValueChange={(value) => setRole(value as "admin" | "user")} items={[["user", "普通用户"], ["admin", "管理员"]]} />
+            <SelectField label="身份" value={role} onValueChange={(value) => setRole(value as "admin" | "user")} items={[["user", "普通用户"], ["admin", "超级管理员"]]} />
             <SelectField label="状态" value={status} onValueChange={setStatus} items={[["active", "正常"], ["disabled", "停用"]]} />
           </div>
+          {role === "user" && <PermissionGroupPicker groups={permissionGroups} value={permissionGroupIds} onChange={setPermissionGroupIds} />}
           <DialogFooter><Button disabled={create.isPending}>{create.isPending ? "创建中..." : "创建"}</Button></DialogFooter>
         </form>
       </DialogContent>
@@ -1051,20 +1382,22 @@ function CreateUserDialog() {
   )
 }
 
-function MailboxActions({ mailbox, users, onDelete }: { mailbox: MailboxType; users: AdminUser[]; onDelete: () => void }) {
+function MailboxActions({ mailbox, users, canUpdate, onDelete }: { mailbox: MailboxType; users: AdminUser[]; canUpdate: boolean; onDelete?: () => void }) {
   const [open, setOpen] = React.useState(false)
-  return <><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => setOpen(true)}>编辑邮箱</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive" onSelect={onDelete}>删除邮箱</DropdownMenuItem></DropdownMenuContent></DropdownMenu><EditMailboxDialog mailbox={mailbox} users={users} open={open} onOpenChange={setOpen} /></>
+  if (!canUpdate && !onDelete) return null
+  return <><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{canUpdate && <DropdownMenuItem onSelect={() => setOpen(true)}>编辑邮箱</DropdownMenuItem>}{canUpdate && onDelete && <DropdownMenuSeparator />}{onDelete && <DropdownMenuItem className="text-destructive" onSelect={onDelete}>删除邮箱</DropdownMenuItem>}</DropdownMenuContent></DropdownMenu>{canUpdate && <EditMailboxDialog mailbox={mailbox} users={users} open={open} onOpenChange={setOpen} />}</>
 }
 
-function AliasActions({ alias, onToggle, onDelete }: { alias: Alias; onToggle: () => void; onDelete: () => void }) {
-  return <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={onToggle}>{alias.enabled ? "停用" : "启用"}</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem className="text-destructive" onSelect={onDelete}>删除别名</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+function AliasActions({ alias, onToggle, onDelete }: { alias: Alias; onToggle?: () => void; onDelete?: () => void }) {
+  if (!onToggle && !onDelete) return null
+  return <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{onToggle && <DropdownMenuItem onSelect={onToggle}>{alias.enabled ? "停用" : "启用"}</DropdownMenuItem>}{onToggle && onDelete && <DropdownMenuSeparator />}{onDelete && <DropdownMenuItem className="text-destructive" onSelect={onDelete}>删除别名</DropdownMenuItem>}</DropdownMenuContent></DropdownMenu>
 }
 
-function EditUserDialog({ user, open, onOpenChange }: { user: AdminUser; open: boolean; onOpenChange: (open: boolean) => void }) {
-  const qc = useQueryClient(); const { toast } = useToast(); const [role, setRole] = React.useState(user.role); const [disabled, setDisabled] = React.useState(user.disabled ? "disabled" : "active")
-  React.useEffect(() => { setRole(user.role); setDisabled(user.disabled ? "disabled" : "active") }, [user, open])
-  const mut = useMutation({ mutationFn: (form: FormData) => api.updateUser(user.id, { displayName: String(form.get("displayName") || ""), role, disabled: disabled === "disabled" }), onSuccess: () => { invalidateAdmin(qc); onOpenChange(false); toast({ title: "用户已更新" }) }, onError: (e) => toast({ title: "更新失败", description: e.message }) })
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent><DialogHeader><DialogTitle>编辑用户</DialogTitle></DialogHeader><form className="space-y-4" onSubmit={(e) => { e.preventDefault(); mut.mutate(new FormData(e.currentTarget)) }}><Field name="email" label="登录邮箱" value={user.email} readOnly /><Field name="displayName" label="显示名称" defaultValue={user.displayName} /><div className="grid grid-cols-2 gap-3"><SelectField label="角色" value={role} onValueChange={(value) => setRole(value as "admin" | "user")} items={[['user','普通用户'],['admin','管理员']]} /><SelectField label="状态" value={disabled} onValueChange={setDisabled} items={[['active','正常'],['disabled','停用']]} /></div><DialogFooter><Button disabled={mut.isPending}>{mut.isPending ? "保存中..." : "保存"}</Button></DialogFooter></form></DialogContent></Dialog>
+function EditUserDialog({ user, permissionGroups, open, onOpenChange }: { user: AdminUser; permissionGroups: PermissionGroup[]; open: boolean; onOpenChange: (open: boolean) => void }) {
+  const qc = useQueryClient(); const { toast } = useToast(); const [role, setRole] = React.useState(user.role); const [disabled, setDisabled] = React.useState(user.disabled ? "disabled" : "active"); const [permissionGroupIds, setPermissionGroupIds] = React.useState<string[]>(assignableUserGroupIDs(user))
+  React.useEffect(() => { setRole(user.role); setDisabled(user.disabled ? "disabled" : "active"); setPermissionGroupIds(assignableUserGroupIDs(user)) }, [user, open])
+  const mut = useMutation({ mutationFn: (form: FormData) => api.updateUser(user.id, { displayName: String(form.get("displayName") || ""), role, disabled: disabled === "disabled", permissionGroupIds: role === "user" ? permissionGroupIds : [] }), onSuccess: () => { invalidateAdmin(qc); onOpenChange(false); toast({ title: "用户已更新" }) }, onError: (e) => toast({ title: "更新失败", description: e.message }) })
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent><DialogHeader><DialogTitle>编辑用户</DialogTitle></DialogHeader><form className="space-y-4" onSubmit={(e) => { e.preventDefault(); mut.mutate(new FormData(e.currentTarget)) }}><Field name="email" label="登录邮箱" value={user.email} readOnly /><Field name="displayName" label="显示名称" defaultValue={user.displayName} /><div className="grid grid-cols-2 gap-3"><SelectField label="身份" value={role} onValueChange={(value) => setRole(value as "admin" | "user")} items={[['user','普通用户'],['admin','超级管理员']]} disabled={user.protected} /><SelectField label="状态" value={disabled} onValueChange={setDisabled} items={[['active','正常'],['disabled','停用']]} disabled={user.protected} /></div>{role === "user" && !user.protected && <PermissionGroupPicker groups={permissionGroups} value={permissionGroupIds} onChange={setPermissionGroupIds} />}<DialogFooter><Button disabled={mut.isPending}>{mut.isPending ? "保存中..." : "保存"}</Button></DialogFooter></form></DialogContent></Dialog>
 }
 
 function ResetPasswordDialog({ user, open, onOpenChange }: { user: AdminUser; open: boolean; onOpenChange: (open: boolean) => void }) {
@@ -1089,7 +1422,7 @@ function CreateMailboxDialog({ domains, users }: { domains: Domain[]; users: Adm
   const qc = useQueryClient(); const { toast } = useToast(); const [open, setOpen] = React.useState(false); const [domainId, setDomainId] = React.useState(""); const [role, setRole] = React.useState("user"); const [ownerMode, setOwnerMode] = React.useState("new"); const [userId, setUserId] = React.useState("")
   React.useEffect(() => { if (!domainId && domains[0]) setDomainId(domains[0].id); if (!userId && users[0]) setUserId(users[0].id) }, [domains, domainId, users, userId])
   const mut = useMutation({ mutationFn: (form: FormData) => api.createMailbox({ domainId, localPart: String(form.get("localPart")), displayName: String(form.get("displayName")), password: String(form.get("password")), quotaMb: Number(form.get("quotaMb") || 1024), role: role as "admin" | "user", ownerEmail: String(form.get("ownerEmail") || ""), userId: ownerMode === "existing" ? userId : "" }), onSuccess: () => { invalidateAdmin(qc); setOpen(false); toast({ title: "邮箱已创建" }) }, onError: (e) => toast({ title: "创建失败", description: e.message }) })
-  return <Dialog open={open} onOpenChange={setOpen}><DialogTrigger asChild><Button><Plus className="h-4 w-4" />邮箱</Button></DialogTrigger><DialogContent><DialogHeader><DialogTitle>创建邮箱账号</DialogTitle></DialogHeader><form className="space-y-4" onSubmit={(e) => { e.preventDefault(); mut.mutate(new FormData(e.currentTarget)) }}><DomainSelect domains={domains} value={domainId} onChange={setDomainId} /><div className="grid grid-cols-2 gap-3"><Field name="localPart" label="账号" placeholder="alice" /><Field name="displayName" label="显示名" placeholder="Alice" /></div><SelectField label="归属方式" value={ownerMode} onValueChange={setOwnerMode} items={[['new','新建/按邮箱匹配用户'],['existing','追加到已有用户']]} />{ownerMode === "existing" ? <SelectField label="已有用户" value={userId} onValueChange={setUserId} items={users.filter((u) => !u.disabled).map((u) => [u.id, u.email])} /> : <Field name="ownerEmail" label="归属用户邮箱" placeholder="留空则使用新邮箱" required={false} />}<div className="grid grid-cols-2 gap-3"><Field name="password" label="密码" type="password" placeholder="至少 8 位" /><Field name="quotaMb" label="配额 MB" type="number" defaultValue="1024" /></div><SelectField label="角色" value={role} onValueChange={setRole} items={[['user','普通用户'],['admin','管理员']]} /><DialogFooter><Button disabled={mut.isPending || !domainId}>创建</Button></DialogFooter></form></DialogContent></Dialog>
+  return <Dialog open={open} onOpenChange={setOpen}><DialogTrigger asChild><Button><Plus className="h-4 w-4" />邮箱</Button></DialogTrigger><DialogContent><DialogHeader><DialogTitle>创建邮箱账号</DialogTitle></DialogHeader><form className="space-y-4" onSubmit={(e) => { e.preventDefault(); mut.mutate(new FormData(e.currentTarget)) }}><DomainSelect domains={domains} value={domainId} onChange={setDomainId} /><div className="grid grid-cols-2 gap-3"><Field name="localPart" label="账号" placeholder="alice" /><Field name="displayName" label="显示名" placeholder="Alice" /></div><SelectField label="归属方式" value={ownerMode} onValueChange={setOwnerMode} items={[['new','新建/按邮箱匹配用户'],['existing','追加到已有用户']]} />{ownerMode === "existing" ? <SelectField label="已有用户" value={userId} onValueChange={setUserId} items={users.filter((u) => !u.disabled).map((u) => [u.id, u.email])} /> : <Field name="ownerEmail" label="归属用户邮箱" placeholder="留空则使用新邮箱" required={false} />}<div className="grid grid-cols-2 gap-3"><Field name="password" label="密码" type="password" placeholder="至少 8 位" /><Field name="quotaMb" label="配额 MB" type="number" defaultValue="1024" /></div><SelectField label="身份" value={role} onValueChange={setRole} items={[['user','普通用户'],['admin','超级管理员']]} /><DialogFooter><Button disabled={mut.isPending || !domainId}>创建</Button></DialogFooter></form></DialogContent></Dialog>
 }
 
 function CreateAliasDialog({ domains }: { domains: Domain[] }) {
@@ -1100,6 +1433,9 @@ function CreateAliasDialog({ domains }: { domains: Domain[] }) {
 }
 
 function DNSPanel({ domain, embedded = false }: { domain?: Domain; embedded?: boolean }) {
+  const me = useMe()
+  const user = me.data?.user
+  const canCheckDNS = hasPermission(user, "admin.dns.check")
   const { toast } = useToast(); const qc = useQueryClient(); const records = useQuery({ queryKey: ["dns-records", domain?.id], queryFn: () => api.dnsRecords(domain!.id), enabled: !!domain })
   const check = useMutation({ mutationFn: () => api.checkDns(domain!.id), onSuccess: (res) => { qc.invalidateQueries({ queryKey: ["admin", "domains"] }); toast({ title: res.status === "ok" ? "DNS 检测通过" : "DNS 检测未通过", description: Object.values(res.checks).map((c) => c.message).join("；") }) } })
   if (!domain) return <Card><CardContent className="p-6 text-muted-foreground">请选择域名</CardContent></Card>
@@ -1111,8 +1447,9 @@ function DNSPanel({ domain, embedded = false }: { domain?: Domain; embedded?: bo
       <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground"><CheckCircle2 className="h-4 w-4" />检测结果</div>
       <div className="mt-2 space-y-2">{Object.entries(check.data.checks).map(([k, v]) => <div key={k} className="flex items-center gap-2 text-sm"><CheckCircle2 className={`h-4 w-4 shrink-0 ${v.ok ? "text-green-600" : "text-destructive"}`} /><span className="font-medium">{k.toUpperCase()}:</span> {v.message}</div>)}</div>
     </>}</>
-  const header = <div className="flex items-center justify-between"><CardTitle>DNS 记录</CardTitle><Button variant="outline" size="sm" onClick={() => check.mutate()} disabled={check.isPending}><RefreshCcw className="h-4 w-4" />检测</Button></div>
-  if (embedded) return <div className="space-y-4"><div className="flex items-center justify-between"><div className="font-medium">DNS 记录</div><Button variant="outline" size="sm" onClick={() => check.mutate()} disabled={check.isPending}><RefreshCcw className="h-4 w-4" />检测</Button></div>{content}</div>
+  const checkButton = canCheckDNS ? <Button variant="outline" size="sm" onClick={() => check.mutate()} disabled={check.isPending}><RefreshCcw className="h-4 w-4" />检测</Button> : null
+  const header = <div className="flex items-center justify-between"><CardTitle>DNS 记录</CardTitle>{checkButton}</div>
+  if (embedded) return <div className="space-y-4"><div className="flex items-center justify-between"><div className="font-medium">DNS 记录</div>{checkButton}</div>{content}</div>
   return <Card><CardHeader>{header}</CardHeader><CardContent>{content}</CardContent></Card>
 }
 
@@ -1165,7 +1502,7 @@ function SwitchRow({ label, checked, onCheckedChange, className = "" }: { label:
   )
 }
 function Field({ label, required = true, ...props }: React.InputHTMLAttributes<HTMLInputElement> & { label: string }) { return <div className="space-y-2"><Label>{label}</Label><Input required={required} {...props} /></div> }
-function SelectField({ label, value, onValueChange, items }: { label: string; value: string; onValueChange: (value: string) => void; items: string[][] }) { return <div className="space-y-2"><Label>{label}</Label><Select value={value} onValueChange={onValueChange}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{items.map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></div> }
+function SelectField({ label, value, onValueChange, items, disabled = false }: { label: string; value: string; onValueChange: (value: string) => void; items: string[][]; disabled?: boolean }) { return <div className="space-y-2"><Label>{label}</Label><Select value={value} onValueChange={onValueChange} disabled={disabled}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent>{items.map(([value, label]) => <SelectItem key={value} value={value}>{label}</SelectItem>)}</SelectContent></Select></div> }
 function DomainSelect({ domains, value, onChange }: { domains: Domain[]; value: string; onChange: (value: string) => void }) { return <div className="space-y-2"><Label>域名</Label><Select value={value} onValueChange={onChange}><SelectTrigger><SelectValue placeholder="选择域名" /></SelectTrigger><SelectContent>{domains.map((d) => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}</SelectContent></Select></div> }
 
 

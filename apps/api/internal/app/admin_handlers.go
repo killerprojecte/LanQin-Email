@@ -73,21 +73,37 @@ func (a *App) handleListUsers(w http.ResponseWriter, r *http.Request) {
 		item.Mailboxes = splitCSV(mailboxCSV)
 		items = append(items, item)
 	}
+	if err := rows.Err(); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to list users")
+		return
+	}
+	if err := rows.Close(); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to list users")
+		return
+	}
+	for i := range items {
+		if err := a.attachUserAuthorization(r.Context(), &items[i].User); err != nil {
+			respondError(w, http.StatusInternalServerError, "failed to load user permissions")
+			return
+		}
+	}
 	respondJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (a *App) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Email       string `json:"email"`
-		DisplayName string `json:"displayName"`
-		Role        string `json:"role"`
-		Password    string `json:"password"`
-		Disabled    bool   `json:"disabled"`
+		Email              string   `json:"email"`
+		DisplayName        string   `json:"displayName"`
+		Role               string   `json:"role"`
+		Password           string   `json:"password"`
+		Disabled           bool     `json:"disabled"`
+		PermissionGroupIDs []string `json:"permissionGroupIds"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		badRequest(w, err)
 		return
 	}
+	actor := currentUser(r)
 	email := normalizeEmail(req.Email)
 	if email == "" || !strings.Contains(email, "@") {
 		badRequest(w, errors.New("invalid email"))
@@ -105,6 +121,10 @@ func (a *App) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, errors.New("invalid role"))
 		return
 	}
+	if role == "admin" && (actor == nil || actor.Role != "admin") {
+		respondError(w, http.StatusForbidden, "only administrators can create administrator users")
+		return
+	}
 	if len(req.Password) < 8 {
 		badRequest(w, errors.New("password must be at least 8 characters"))
 		return
@@ -116,10 +136,27 @@ func (a *App) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	id := newID("usr")
 	now := a.now().UTC().Format(time.RFC3339Nano)
-	_, err = a.db.ExecContext(r.Context(), `INSERT INTO users(id,email,display_name,role,password_hash,disabled,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?)`, id, email, displayName, role, string(passwordHash), boolInt(req.Disabled), now, now)
+	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to start transaction")
+		return
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(r.Context(), `INSERT INTO users(id,email,display_name,role,password_hash,disabled,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?)`, id, email, displayName, role, string(passwordHash), boolInt(req.Disabled), now, now); err != nil {
 		badRequest(w, err)
+		return
+	}
+	permissionGroupIDs := req.PermissionGroupIDs
+	if role == "admin" {
+		permissionGroupIDs = nil
+	}
+	if err := a.setUserPermissionGroups(r.Context(), tx, id, permissionGroupIDs, actor); err != nil {
+		badRequest(w, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to create user")
 		return
 	}
 	user, err := a.adminUserByID(r.Context(), id)
@@ -134,9 +171,10 @@ func (a *App) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	current := currentUser(r)
 	var req struct {
-		DisplayName string `json:"displayName"`
-		Role        string `json:"role"`
-		Disabled    *bool  `json:"disabled"`
+		DisplayName        string    `json:"displayName"`
+		Role               string    `json:"role"`
+		Disabled           *bool     `json:"disabled"`
+		PermissionGroupIDs *[]string `json:"permissionGroupIds"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		badRequest(w, err)
@@ -155,21 +193,79 @@ func (a *App) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, errors.New("invalid role"))
 		return
 	}
-	disabled := false
+	existing, err := a.userByID(r.Context(), id)
+	if err != nil {
+		respondError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if current == nil || (current.Role != "admin" && (existing.Role == "admin" || role == "admin")) {
+		respondError(w, http.StatusForbidden, "only administrators can modify administrator users")
+		return
+	}
+	disabled := existing.Disabled
 	if req.Disabled != nil {
 		disabled = *req.Disabled
 	}
-	if current != nil && current.ID == id && (disabled || role != "admin") {
-		badRequest(w, errors.New("cannot remove your own admin access"))
+	if a.isDefaultAdminUser(existing) && (role != "admin" || disabled) {
+		badRequest(w, errors.New("default administrator must remain an active super administrator"))
 		return
 	}
 	if err := a.ensureAdminRemains(r.Context(), id, role, disabled); err != nil {
 		badRequest(w, err)
 		return
 	}
-	_, err := a.db.ExecContext(r.Context(), `UPDATE users SET display_name=?, role=?, disabled=?, updated_at=? WHERE id=?`,
-		displayName, role, boolInt(disabled), a.now().UTC().Format(time.RFC3339Nano), id)
+	shouldUpdatePermissionGroups := role == "admin" || existing.Role == "admin" || req.PermissionGroupIDs != nil
+	var permissionGroupIDs []string
+	if role == "user" {
+		if req.PermissionGroupIDs != nil {
+			permissionGroupIDs = *req.PermissionGroupIDs
+		} else if existing.Role == "user" {
+			for _, groupID := range existing.PermissionGroupIDs {
+				if isAssignablePermissionGroupID(groupID) {
+					permissionGroupIDs = append(permissionGroupIDs, groupID)
+				}
+			}
+		}
+	}
+	if current != nil && current.ID == id {
+		next := *existing
+		next.Role = role
+		next.Disabled = disabled
+		if shouldUpdatePermissionGroups {
+			if role == "admin" {
+				next.Permissions = allPermissionKeys()
+			} else {
+				permissions, err := a.permissionsForGroupIDs(r.Context(), nil, permissionGroupIDs)
+				if err != nil {
+					badRequest(w, err)
+					return
+				}
+				next.Permissions = permissions
+			}
+		}
+		if next.Disabled || !userHasAdminAccess(&next) {
+			badRequest(w, errors.New("cannot remove your own admin access"))
+			return
+		}
+	}
+	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to start transaction")
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(r.Context(), `UPDATE users SET display_name=?, role=?, disabled=?, updated_at=? WHERE id=?`,
+		displayName, role, boolInt(disabled), a.now().UTC().Format(time.RFC3339Nano), id); err != nil {
+		respondError(w, http.StatusInternalServerError, "failed to update user")
+		return
+	}
+	if shouldUpdatePermissionGroups {
+		if err := a.setUserPermissionGroups(r.Context(), tx, id, permissionGroupIDs, current); err != nil {
+			badRequest(w, err)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		respondError(w, http.StatusInternalServerError, "failed to update user")
 		return
 	}
@@ -183,6 +279,16 @@ func (a *App) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleResetUserPassword(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	if target, err := a.userByID(r.Context(), id); err != nil {
+		respondError(w, http.StatusNotFound, "user not found")
+		return
+	} else if target.Role == "admin" {
+		current := currentUser(r)
+		if current == nil || current.Role != "admin" {
+			respondError(w, http.StatusForbidden, "only administrators can reset administrator passwords")
+			return
+		}
+	}
 	var req struct {
 		Password string `json:"password"`
 	}
@@ -232,6 +338,16 @@ func (a *App) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	current := currentUser(r)
 	if current != nil && current.ID == id {
 		badRequest(w, errors.New("cannot delete your own user"))
+		return
+	}
+	if target, err := a.userByID(r.Context(), id); err != nil {
+		respondError(w, http.StatusNotFound, "user not found")
+		return
+	} else if a.isDefaultAdminUser(target) {
+		badRequest(w, errors.New("default administrator cannot be deleted"))
+		return
+	} else if target.Role == "admin" && (current == nil || current.Role != "admin") {
+		respondError(w, http.StatusForbidden, "only administrators can delete administrator users")
 		return
 	}
 	if err := a.ensureAdminRemains(r.Context(), id, "user", true); err != nil {
@@ -408,6 +524,13 @@ func (a *App) handleCreateMailbox(w http.ResponseWriter, r *http.Request) {
 	if role != "user" && role != "admin" {
 		badRequest(w, errors.New("invalid role"))
 		return
+	}
+	if role == "admin" {
+		current := currentUser(r)
+		if current == nil || current.Role != "admin" {
+			respondError(w, http.StatusForbidden, "only administrators can create administrator users")
+			return
+		}
 	}
 
 	domain, err := a.domainByID(r.Context(), req.DomainID)
@@ -836,6 +959,9 @@ func (a *App) adminUserByID(ctx context.Context, id string) (*AdminUser, error) 
 	item.TwoFactorEnabled = intBool(twoFactorEnabled)
 	item.CreatedAt = parseTime(created)
 	item.Mailboxes = splitCSV(mailboxCSV)
+	if err := a.attachUserAuthorization(ctx, &item.User); err != nil {
+		return nil, err
+	}
 	return &item, nil
 }
 

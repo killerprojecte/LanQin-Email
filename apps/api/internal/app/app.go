@@ -115,6 +115,22 @@ func (a *App) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS permission_groups (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL UNIQUE,
+			description TEXT NOT NULL DEFAULT '',
+			permissions_json TEXT NOT NULL DEFAULT '[]',
+			system INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS user_permission_groups (
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			group_id TEXT NOT NULL REFERENCES permission_groups(id) ON DELETE CASCADE,
+			created_at TEXT NOT NULL,
+			PRIMARY KEY(user_id, group_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_user_permission_groups_group ON user_permission_groups(group_id, user_id)`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 			id TEXT PRIMARY KEY,
 			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -325,6 +341,9 @@ func (a *App) migrate(ctx context.Context) error {
 		return err
 	}
 	if err := a.migrateLegacyBootstrapMailbox(ctx); err != nil {
+		return err
+	}
+	if err := a.ensureDefaultPermissionGroups(ctx); err != nil {
 		return err
 	}
 	return nil
@@ -679,7 +698,7 @@ func (a *App) seed(ctx context.Context) error {
 		return err
 	}
 	if count > 0 {
-		return nil
+		return a.ensureConfiguredAdminSuperAdmin(ctx)
 	}
 
 	adminPassword := a.cfg.AdminPassword
@@ -734,6 +753,16 @@ func (a *App) seed(ctx context.Context) error {
 		a.log.Warn("failed to create welcome message", "error", err)
 	}
 	return nil
+}
+
+func (a *App) ensureConfiguredAdminSuperAdmin(ctx context.Context) error {
+	adminEmail := normalizeEmail(a.cfg.AdminEmail)
+	if adminEmail == "" || !strings.Contains(adminEmail, "@") {
+		return nil
+	}
+	_, err := a.db.ExecContext(ctx, `UPDATE users SET role='admin', disabled=0, updated_at=? WHERE email=?`,
+		a.now().UTC().Format(time.RFC3339Nano), adminEmail)
+	return err
 }
 
 func (a *App) createDomainTx(ctx context.Context, tx *sql.Tx, name string) (string, error) {

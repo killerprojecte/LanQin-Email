@@ -87,36 +87,41 @@ func (a *App) Router() http.Handler {
 
 		r.Group(func(r chi.Router) {
 			r.Use(a.requireAuth)
-			r.Use(a.requireAdmin)
-			r.Get("/admin/overview", a.handleAdminOverview)
-			r.Get("/admin/users", a.handleListUsers)
-			r.Post("/admin/users", a.handleCreateUser)
-			r.Post("/admin/users/{id}", a.handleUpdateUser)
-			r.Post("/admin/users/{id}/password", a.handleResetUserPassword)
-			r.Delete("/admin/users/{id}", a.handleDeleteUser)
-			r.Get("/admin/domains", a.handleListDomains)
-			r.Post("/admin/domains", a.handleCreateDomain)
-			r.Post("/admin/domains/{id}", a.handleUpdateDomain)
-			r.Delete("/admin/domains/{id}", a.handleDeleteDomain)
-			r.Get("/admin/mailboxes", a.handleListMailboxes)
-			r.Post("/admin/mailboxes", a.handleCreateMailbox)
-			r.Post("/admin/mailboxes/{id}", a.handleUpdateMailbox)
-			r.Delete("/admin/mailboxes/{id}", a.handleDeleteMailbox)
-			r.Get("/admin/aliases", a.handleListAliases)
-			r.Post("/admin/aliases", a.handleCreateAlias)
-			r.Post("/admin/aliases/{id}", a.handleUpdateAlias)
-			r.Delete("/admin/aliases/{id}", a.handleDeleteAlias)
-			r.Get("/admin/messages", a.handleAdminMessages)
-			r.Get("/admin/messages/{id}", a.handleAdminMessage)
-			r.Get("/admin/attachments/{id}", a.handleAdminAttachment)
-			r.Get("/admin/settings", a.handleGetSystemSettings)
-			r.Post("/admin/settings", a.handleUpdateSystemSettings)
-			r.Post("/admin/settings/test-smtp", a.handleTestSMTP)
-			r.Get("/admin/mail-templates", a.handleListMailTemplates)
-			r.Post("/admin/mail-templates/{key}", a.handleUpdateMailTemplate)
-			r.Post("/admin/mail-templates/{key}/reset", a.handleResetMailTemplate)
-			r.Get("/admin/domains/{id}/dns-records", a.handleDNSRecords)
-			r.Post("/admin/domains/{id}/check-dns", a.handleDNSCheck)
+			r.Use(a.requireAdminAccess)
+			r.With(a.requirePermission(PermissionAdminOverview)).Get("/admin/overview", a.handleAdminOverview)
+			r.With(a.requireAnyPermission(PermissionUsersView, PermissionMailboxesView)).Get("/admin/users", a.handleListUsers)
+			r.With(a.requirePermission(PermissionUsersCreate)).Post("/admin/users", a.handleCreateUser)
+			r.With(a.requirePermission(PermissionUsersUpdate)).Post("/admin/users/{id}", a.handleUpdateUser)
+			r.With(a.requirePermission(PermissionUsersResetPassword)).Post("/admin/users/{id}/password", a.handleResetUserPassword)
+			r.With(a.requirePermission(PermissionUsersDelete)).Delete("/admin/users/{id}", a.handleDeleteUser)
+			r.With(a.requireAnyPermission(PermissionGroupsView, PermissionUsersView)).Get("/admin/permissions", a.handlePermissionCatalog)
+			r.With(a.requireAnyPermission(PermissionGroupsView, PermissionUsersView)).Get("/admin/permission-groups", a.handleListPermissionGroups)
+			r.With(a.requirePermission(PermissionGroupsCreate)).Post("/admin/permission-groups", a.handleCreatePermissionGroup)
+			r.With(a.requirePermission(PermissionGroupsUpdate)).Post("/admin/permission-groups/{id}", a.handleUpdatePermissionGroup)
+			r.With(a.requirePermission(PermissionGroupsDelete)).Delete("/admin/permission-groups/{id}", a.handleDeletePermissionGroup)
+			r.With(a.requireAnyPermission(PermissionDomainsView, PermissionDNSView, PermissionMailboxesView, PermissionAliasesView, PermissionSettingsView, PermissionTemplatesView)).Get("/admin/domains", a.handleListDomains)
+			r.With(a.requirePermission(PermissionDomainsCreate)).Post("/admin/domains", a.handleCreateDomain)
+			r.With(a.requirePermission(PermissionDomainsUpdate)).Post("/admin/domains/{id}", a.handleUpdateDomain)
+			r.With(a.requirePermission(PermissionDomainsDelete)).Delete("/admin/domains/{id}", a.handleDeleteDomain)
+			r.With(a.requireAnyPermission(PermissionMailboxesView, PermissionMessagesView)).Get("/admin/mailboxes", a.handleListMailboxes)
+			r.With(a.requirePermission(PermissionMailboxesCreate)).Post("/admin/mailboxes", a.handleCreateMailbox)
+			r.With(a.requirePermission(PermissionMailboxesUpdate)).Post("/admin/mailboxes/{id}", a.handleUpdateMailbox)
+			r.With(a.requirePermission(PermissionMailboxesDelete)).Delete("/admin/mailboxes/{id}", a.handleDeleteMailbox)
+			r.With(a.requirePermission(PermissionAliasesView)).Get("/admin/aliases", a.handleListAliases)
+			r.With(a.requirePermission(PermissionAliasesCreate)).Post("/admin/aliases", a.handleCreateAlias)
+			r.With(a.requirePermission(PermissionAliasesUpdate)).Post("/admin/aliases/{id}", a.handleUpdateAlias)
+			r.With(a.requirePermission(PermissionAliasesDelete)).Delete("/admin/aliases/{id}", a.handleDeleteAlias)
+			r.With(a.requirePermission(PermissionMessagesView)).Get("/admin/messages", a.handleAdminMessages)
+			r.With(a.requirePermission(PermissionMessagesRead)).Get("/admin/messages/{id}", a.handleAdminMessage)
+			r.With(a.requirePermission(PermissionMessagesAttachment)).Get("/admin/attachments/{id}", a.handleAdminAttachment)
+			r.With(a.requirePermission(PermissionSettingsView)).Get("/admin/settings", a.handleGetSystemSettings)
+			r.With(a.requirePermission(PermissionSettingsUpdate)).Post("/admin/settings", a.handleUpdateSystemSettings)
+			r.With(a.requirePermission(PermissionSettingsTestSMTP)).Post("/admin/settings/test-smtp", a.handleTestSMTP)
+			r.With(a.requirePermission(PermissionTemplatesView)).Get("/admin/mail-templates", a.handleListMailTemplates)
+			r.With(a.requirePermission(PermissionTemplatesUpdate)).Post("/admin/mail-templates/{key}", a.handleUpdateMailTemplate)
+			r.With(a.requirePermission(PermissionTemplatesReset)).Post("/admin/mail-templates/{key}/reset", a.handleResetMailTemplate)
+			r.With(a.requirePermission(PermissionDNSView)).Get("/admin/domains/{id}/dns-records", a.handleDNSRecords)
+			r.With(a.requirePermission(PermissionDNSCheck)).Post("/admin/domains/{id}/check-dns", a.handleDNSCheck)
 		})
 	})
 
@@ -152,17 +157,6 @@ func (a *App) requireAuth(next http.Handler) http.Handler {
 	})
 }
 
-func (a *App) requireAdmin(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user := currentUser(r)
-		if user == nil || user.Role != "admin" {
-			respondError(w, http.StatusForbidden, "admin role required")
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 func currentUser(r *http.Request) *User {
 	user, _ := r.Context().Value(userContextKey).(*User)
 	return user
@@ -188,6 +182,9 @@ func (a *App) authenticateRequest(r *http.Request) (*User, error) {
 	if u.Disabled {
 		return nil, errors.New("disabled")
 	}
+	if err := a.attachUserAuthorization(r.Context(), &u); err != nil {
+		return nil, err
+	}
 	return &u, nil
 }
 
@@ -206,6 +203,9 @@ func (a *App) userByEmail(ctx context.Context, email string) (*User, string, err
 	u.Disabled = intBool(disabled)
 	u.TwoFactorEnabled = intBool(twoFactorEnabled)
 	u.CreatedAt = parseTime(created)
+	if err := a.attachUserAuthorization(ctx, &u); err != nil {
+		return nil, "", err
+	}
 	return &u, passwordHash, nil
 }
 
@@ -223,5 +223,8 @@ func (a *App) userByID(ctx context.Context, id string) (*User, error) {
 	u.Disabled = intBool(disabled)
 	u.TwoFactorEnabled = intBool(twoFactorEnabled)
 	u.CreatedAt = parseTime(created)
+	if err := a.attachUserAuthorization(ctx, &u); err != nil {
+		return nil, err
+	}
 	return &u, nil
 }

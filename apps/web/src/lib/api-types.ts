@@ -1,4 +1,41 @@
-export type User = { id: string; email: string; displayName: string; role: "admin" | "user"; disabled: boolean; twoFactorEnabled: boolean; createdAt: string }
+export type PermissionKey =
+  | "admin.overview.view"
+  | "admin.users.view"
+  | "admin.users.create"
+  | "admin.users.update"
+  | "admin.users.delete"
+  | "admin.users.reset_password"
+  | "admin.permission_groups.view"
+  | "admin.permission_groups.create"
+  | "admin.permission_groups.update"
+  | "admin.permission_groups.delete"
+  | "admin.domains.view"
+  | "admin.domains.create"
+  | "admin.domains.update"
+  | "admin.domains.delete"
+  | "admin.dns.view"
+  | "admin.dns.check"
+  | "admin.mailboxes.view"
+  | "admin.mailboxes.create"
+  | "admin.mailboxes.update"
+  | "admin.mailboxes.delete"
+  | "admin.aliases.view"
+  | "admin.aliases.create"
+  | "admin.aliases.update"
+  | "admin.aliases.delete"
+  | "admin.messages.view"
+  | "admin.messages.read"
+  | "admin.messages.attachments"
+  | "admin.settings.view"
+  | "admin.settings.update"
+  | "admin.settings.test_smtp"
+  | "admin.templates.view"
+  | "admin.templates.update"
+  | "admin.templates.reset"
+export type PermissionInfo = { key: PermissionKey; label: string; description: string; category: string }
+export type PermissionGroupSummary = { id: string; name: string }
+export type PermissionGroup = { id: string; name: string; description: string; permissions: PermissionKey[]; system: boolean; userCount: number; createdAt: string; updatedAt: string }
+export type User = { id: string; email: string; displayName: string; role: "admin" | "user"; disabled: boolean; protected: boolean; twoFactorEnabled: boolean; permissions: PermissionKey[]; permissionGroupIds: string[]; permissionGroups: PermissionGroupSummary[]; createdAt: string }
 export type AdminUser = User & { mailboxCount: number; mailboxes?: string[] }
 export type AdminOverview = { users: number; activeUsers: number; domains: number; mailboxes: number; activeMailboxes: number; aliases: number; messages: number; unreadMessages: number; storageBytes: number }
 export type Domain = { id: string; name: string; status: string; dkimSelector: string; dkimPublicKey?: string; dnsStatus: string; dnsCheckedAt?: string; createdAt: string }

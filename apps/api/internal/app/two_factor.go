@@ -135,6 +135,9 @@ func (a *App) loadUserAuthByID(ctx context.Context, id string) (*User, string, e
 	u.Disabled = intBool(disabled)
 	u.TwoFactorEnabled = intBool(twoFactorEnabled)
 	u.CreatedAt = parseTime(created)
+	if err := a.attachUserAuthorization(ctx, &u); err != nil {
+		return nil, "", err
+	}
 	return &u, secret, nil
 }
 

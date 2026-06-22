@@ -306,7 +306,7 @@ function ProfileOverview({ user, profile, password, passwordFormRef, stats, disp
                 <ShieldCheck className="h-4 w-4" />
                 角色
               </div>
-              <Badge>{user.role === "admin" ? "管理员" : "普通用户"}</Badge>
+              <Badge>{user.role === "admin" ? "超级管理员" : "普通用户"}</Badge>
             </div>
             <div className="flex items-center justify-between rounded-lg border p-3 text-sm">
               <span>账号状态</span>

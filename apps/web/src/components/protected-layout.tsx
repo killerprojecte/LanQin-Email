@@ -1,12 +1,14 @@
 import * as React from "react"
 import { Outlet, Link, useLocation } from "react-router-dom"
-import { BarChart3, Copy, Globe2, Inbox, LogOut, Mail, Mailbox, Settings, Users } from "lucide-react"
+import { BarChart3, Copy, Globe2, Inbox, LogOut, Mail, Mailbox, Settings, ShieldCheck, Users } from "lucide-react"
 import { useMe } from "@/hooks/use-me"
 import { useLogout } from "@/hooks/use-logout"
 import { AuthGuard } from "@/components/auth-guard"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
+import { hasAnyPermission } from "@/lib/permissions"
+import type { PermissionKey } from "@/lib/api-types"
 import {
   Sidebar,
   SidebarContent,
@@ -24,14 +26,15 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar"
 
-const adminSections = [
-  { key: "overview", label: "概览", icon: <BarChart3 /> },
-  { key: "users", label: "用户", icon: <Users /> },
-  { key: "domains", label: "域名", icon: <Globe2 /> },
-  { key: "mailboxes", label: "邮箱账号", icon: <Mailbox /> },
-  { key: "aliases", label: "别名转发", icon: <Copy /> },
-  { key: "messages", label: "全部邮件", icon: <Inbox /> },
-  { key: "settings", label: "系统设置", icon: <Settings /> },
+const adminSections: { key: string; label: string; icon: React.ReactNode; permissions: PermissionKey[] }[] = [
+  { key: "overview", label: "概览", icon: <BarChart3 />, permissions: ["admin.overview.view"] },
+  { key: "users", label: "用户", icon: <Users />, permissions: ["admin.users.view"] },
+  { key: "permissionGroups", label: "权限组", icon: <ShieldCheck />, permissions: ["admin.permission_groups.view"] },
+  { key: "domains", label: "域名", icon: <Globe2 />, permissions: ["admin.domains.view", "admin.dns.view"] },
+  { key: "mailboxes", label: "邮箱账号", icon: <Mailbox />, permissions: ["admin.mailboxes.view"] },
+  { key: "aliases", label: "别名转发", icon: <Copy />, permissions: ["admin.aliases.view"] },
+  { key: "messages", label: "全部邮件", icon: <Inbox />, permissions: ["admin.messages.view"] },
+  { key: "settings", label: "系统设置", icon: <Settings />, permissions: ["admin.settings.view", "admin.templates.view"] },
 ]
 
 export function ProtectedLayout() {
@@ -52,6 +55,7 @@ function ProtectedContent() {
   const isProfileRoute = location.pathname.startsWith("/profile")
   const isAdminRoute = location.pathname.startsWith("/admin")
   const adminSection = new URLSearchParams(location.search).get("section") || "overview"
+  const visibleAdminSections = adminSections.filter((item) => hasAnyPermission(user, item.permissions))
 
   if (isMailRoute || isProfileRoute) {
     return <Outlet />
@@ -77,11 +81,11 @@ function ProtectedContent() {
           </SidebarMenu>
         </SidebarHeader>
         <SidebarContent>
-          {user.role === "admin" && isAdminRoute && (
+          {isAdminRoute && visibleAdminSections.length > 0 && (
             <SidebarGroup>
               <SidebarGroupContent>
                 <SidebarMenu>
-                  <AdminSectionItems activeSection={adminSection} />
+                  <AdminSectionItems activeSection={adminSection} sections={visibleAdminSections} />
                 </SidebarMenu>
               </SidebarGroupContent>
             </SidebarGroup>
@@ -102,7 +106,7 @@ function ProtectedContent() {
                     <span className="truncate text-xs text-muted-foreground">{user.email}</span>
                   </div>
                   <Badge variant={user.role === "admin" ? "default" : "secondary"} className="ml-auto text-[10px]">
-                    {user.role === "admin" ? "管理员" : "用户"}
+                    {user.role === "admin" ? "超级管理员" : "普通用户"}
                   </Badge>
                 </Link>
               </SidebarMenuButton>
@@ -121,7 +125,7 @@ function ProtectedContent() {
           <div className="flex h-12 items-center gap-3 border-b bg-background px-3 md:hidden">
             <SidebarTrigger aria-label="打开导航" />
             <div className="min-w-0 flex-1 truncate text-sm font-semibold">
-              {isAdminRoute ? adminSections.find((item) => item.key === adminSection)?.label || "系统管理" : "LanQin Email"}
+              {isAdminRoute ? visibleAdminSections.find((item) => item.key === adminSection)?.label || "系统管理" : "LanQin Email"}
             </div>
           </div>
           <Outlet />
@@ -131,13 +135,13 @@ function ProtectedContent() {
   )
 }
 
-function AdminSectionItems({ activeSection }: { activeSection: string }) {
+function AdminSectionItems({ activeSection, sections }: { activeSection: string; sections: typeof adminSections }) {
   const { isMobile, setOpenMobile } = useSidebar()
 
   function closeMobile() {
     if (isMobile) setOpenMobile(false)
   }
-  return adminSections.map((item) => (
+  return sections.map((item) => (
     <SidebarMenuItem key={item.key}>
       <SidebarMenuButton asChild isActive={activeSection === item.key} tooltip={item.label}>
         <Link to={`/admin?section=${item.key}`} onClick={closeMobile}>

@@ -886,6 +886,231 @@ func TestDNSRecords(t *testing.T) {
 	}
 }
 
+func TestFixedRolesProtectAdminRoutesAndDefaultAdmin(t *testing.T) {
+	a := newTestApp(t)
+	ts := httptest.NewServer(a.Router())
+	defer ts.Close()
+	admin := &testClient{t: t, server: ts}
+
+	var login map[string]any
+	if code := admin.do("POST", "/api/auth/login", map[string]string{"email": "admin@lanqin.local", "password": "ChangeMe123!"}, &login); code != http.StatusOK {
+		t.Fatalf("admin login code=%d body=%v", code, login)
+	}
+
+	var groups struct {
+		Items []PermissionGroup `json:"items"`
+	}
+	if code := admin.do("GET", "/api/admin/permission-groups", nil, &groups); code != http.StatusOK || len(groups.Items) != len(defaultPermissionGroups()) {
+		t.Fatalf("fixed permission groups code=%d groups=%+v", code, groups.Items)
+	}
+	groupByID := map[string]PermissionGroup{}
+	for _, group := range groups.Items {
+		groupByID[group.ID] = group
+	}
+	for _, group := range defaultPermissionGroups() {
+		if _, ok := groupByID[group.ID]; !ok {
+			t.Fatalf("missing fixed permission group %s in %+v", group.ID, groups.Items)
+		}
+	}
+	if groups.Items[0].ID != PermissionGroupSuperAdmin || groups.Items[1].ID != PermissionGroupRegular || groupByID[PermissionGroupMailboxAdmin].UserCount != 0 {
+		t.Fatalf("unexpected fixed permission groups: %+v", groups.Items)
+	}
+
+	var errBody map[string]any
+	var users struct {
+		Items []AdminUser `json:"items"`
+	}
+	var customGroup PermissionGroup
+	if code := admin.do("POST", "/api/admin/permission-groups", map[string]any{
+		"name":        "Mailbox Viewers",
+		"description": "Can view mailboxes only",
+		"permissions": []string{PermissionAdminOverview, PermissionMailboxesView},
+	}, &customGroup); code != http.StatusCreated {
+		t.Fatalf("custom permission group creation code=%d group=%+v", code, customGroup)
+	}
+	if customGroup.System || customGroup.ID == "" || !userHasPermission(&User{Role: "user", Permissions: customGroup.Permissions}, PermissionMailboxesView) || userHasPermission(&User{Role: "user", Permissions: customGroup.Permissions}, PermissionMailboxesCreate) {
+		t.Fatalf("custom permission group permissions=%+v", customGroup)
+	}
+	if code := admin.do("POST", "/api/admin/permission-groups/"+PermissionGroupMailboxAdmin, map[string]any{
+		"name":        "Changed",
+		"description": "Should not change",
+		"permissions": []string{PermissionMailboxesView},
+	}, &errBody); code != http.StatusForbidden {
+		t.Fatalf("system permission group update should be forbidden code=%d body=%v", code, errBody)
+	}
+	if code := admin.do("DELETE", "/api/admin/permission-groups/"+PermissionGroupMailboxAdmin, nil, &errBody); code != http.StatusForbidden {
+		t.Fatalf("system permission group delete should be forbidden code=%d body=%v", code, errBody)
+	}
+	if code := admin.do("POST", "/api/admin/users", map[string]any{
+		"email":              "invalid-group@lanqin.local",
+		"displayName":        "Invalid Group",
+		"role":               "user",
+		"password":           "Password123!",
+		"disabled":           false,
+		"permissionGroupIds": []string{PermissionGroupSuperAdmin},
+	}, &errBody); code != http.StatusBadRequest {
+		t.Fatalf("assigning super admin group should be rejected code=%d body=%v", code, errBody)
+	}
+
+	var mailboxUser AdminUser
+	if code := admin.do("POST", "/api/admin/users", map[string]any{
+		"email":              "mailbox-admin@lanqin.local",
+		"displayName":        "Mailbox Admin",
+		"role":               "user",
+		"password":           "Password123!",
+		"disabled":           false,
+		"permissionGroupIds": []string{PermissionGroupMailboxAdmin},
+	}, &mailboxUser); code != http.StatusCreated {
+		t.Fatalf("create mailbox admin user code=%d user=%+v", code, mailboxUser)
+	}
+	if mailboxUser.Role != "user" || len(mailboxUser.PermissionGroupIDs) != 1 || mailboxUser.PermissionGroupIDs[0] != PermissionGroupMailboxAdmin || !userHasPermission(&mailboxUser.User, PermissionMailboxesManage) || userHasPermission(&mailboxUser.User, PermissionSystemSettings) {
+		t.Fatalf("mailbox admin authorization=%+v", mailboxUser.User)
+	}
+
+	var customUser AdminUser
+	if code := admin.do("POST", "/api/admin/users", map[string]any{
+		"email":              "mailbox-viewer@lanqin.local",
+		"displayName":        "Mailbox Viewer",
+		"role":               "user",
+		"password":           "Password123!",
+		"disabled":           false,
+		"permissionGroupIds": []string{customGroup.ID},
+	}, &customUser); code != http.StatusCreated {
+		t.Fatalf("create custom group user code=%d user=%+v", code, customUser)
+	}
+	if !userHasPermission(&customUser.User, PermissionMailboxesView) || userHasPermission(&customUser.User, PermissionMailboxesCreate) {
+		t.Fatalf("custom group user authorization=%+v", customUser.User)
+	}
+	if code := admin.do("DELETE", "/api/admin/permission-groups/"+customGroup.ID, nil, &errBody); code != http.StatusBadRequest {
+		t.Fatalf("assigned custom permission group delete should be rejected code=%d body=%v", code, errBody)
+	}
+
+	mailboxAdmin := &testClient{t: t, server: ts}
+	if code := mailboxAdmin.do("POST", "/api/auth/login", map[string]string{"email": "mailbox-admin@lanqin.local", "password": "Password123!"}, &login); code != http.StatusOK {
+		t.Fatalf("mailbox admin login code=%d", code)
+	}
+	var mailboxList struct {
+		Items []Mailbox `json:"items"`
+	}
+	if code := mailboxAdmin.do("GET", "/api/admin/mailboxes", nil, &mailboxList); code != http.StatusOK {
+		t.Fatalf("mailbox admin should access mailboxes code=%d", code)
+	}
+	if code := mailboxAdmin.do("GET", "/api/admin/settings", nil, &errBody); code != http.StatusForbidden {
+		t.Fatalf("mailbox admin settings should be forbidden code=%d body=%v", code, errBody)
+	}
+	if code := mailboxAdmin.do("GET", "/api/admin/users", nil, &errBody); code != http.StatusOK {
+		t.Fatalf("mailbox admin should read users for mailbox ownership code=%d body=%v", code, errBody)
+	}
+	viewer := &testClient{t: t, server: ts}
+	if code := viewer.do("POST", "/api/auth/login", map[string]string{"email": "mailbox-viewer@lanqin.local", "password": "Password123!"}, &login); code != http.StatusOK {
+		t.Fatalf("mailbox viewer login code=%d", code)
+	}
+	if code := viewer.do("GET", "/api/admin/mailboxes", nil, &mailboxList); code != http.StatusOK {
+		t.Fatalf("mailbox viewer should read mailboxes code=%d", code)
+	}
+	if code := viewer.do("POST", "/api/admin/mailboxes", map[string]any{
+		"domainId":    mustDefaultDomainID(t, a),
+		"localPart":   "blocked-create",
+		"displayName": "Blocked Create",
+		"password":    "Password123!",
+		"quotaMb":     1024,
+		"role":        "user",
+	}, &errBody); code != http.StatusForbidden {
+		t.Fatalf("mailbox viewer should not create mailboxes code=%d body=%v", code, errBody)
+	}
+	if code := mailboxAdmin.do("POST", "/api/admin/users", map[string]any{
+		"email":              "blocked-by-mailbox-admin@lanqin.local",
+		"displayName":        "Blocked",
+		"role":               "user",
+		"password":           "Password123!",
+		"disabled":           false,
+		"permissionGroupIds": []string{PermissionGroupMailboxAdmin},
+	}, &errBody); code != http.StatusForbidden {
+		t.Fatalf("mailbox admin should not create users code=%d body=%v", code, errBody)
+	}
+
+	var userManager AdminUser
+	if code := admin.do("POST", "/api/admin/users", map[string]any{
+		"email":              "user-admin@lanqin.local",
+		"displayName":        "User Admin",
+		"role":               "user",
+		"password":           "Password123!",
+		"disabled":           false,
+		"permissionGroupIds": []string{PermissionGroupUserAdmin},
+	}, &userManager); code != http.StatusCreated {
+		t.Fatalf("create user admin code=%d user=%+v", code, userManager)
+	}
+	userAdmin := &testClient{t: t, server: ts}
+	if code := userAdmin.do("POST", "/api/auth/login", map[string]string{"email": "user-admin@lanqin.local", "password": "Password123!"}, &login); code != http.StatusOK {
+		t.Fatalf("user admin login code=%d", code)
+	}
+	if code := userAdmin.do("GET", "/api/admin/users", nil, &users); code != http.StatusOK {
+		t.Fatalf("user admin users code=%d body=%v", code, users)
+	}
+	if code := userAdmin.do("POST", "/api/admin/users", map[string]any{
+		"email":              "delegated-mailbox@lanqin.local",
+		"displayName":        "Delegated Mailbox",
+		"role":               "user",
+		"password":           "Password123!",
+		"disabled":           false,
+		"permissionGroupIds": []string{PermissionGroupMailboxAdmin},
+	}, &errBody); code != http.StatusBadRequest {
+		t.Fatalf("user admin should not assign mailbox admin group code=%d body=%v", code, errBody)
+	}
+	var regularUser AdminUser
+	if code := userAdmin.do("POST", "/api/admin/users", map[string]any{
+		"email":              "delegated-user@lanqin.local",
+		"displayName":        "Delegated User",
+		"role":               "user",
+		"password":           "Password123!",
+		"disabled":           false,
+		"permissionGroupIds": []string{PermissionGroupUserAdmin},
+	}, &regularUser); code != http.StatusCreated {
+		t.Fatalf("user admin should assign own group code=%d user=%+v", code, regularUser)
+	}
+	if code := userAdmin.do("POST", "/api/admin/users", map[string]any{
+		"email":              "delegated-super@lanqin.local",
+		"displayName":        "Delegated Super",
+		"role":               "admin",
+		"password":           "Password123!",
+		"disabled":           false,
+		"permissionGroupIds": []string{},
+	}, &errBody); code != http.StatusForbidden {
+		t.Fatalf("user admin should not create super admin code=%d body=%v", code, errBody)
+	}
+
+	if code := admin.do("GET", "/api/admin/users", nil, &users); code != http.StatusOK || len(users.Items) == 0 {
+		t.Fatalf("admin users code=%d items=%d", code, len(users.Items))
+	}
+	var defaultAdmin AdminUser
+	for _, user := range users.Items {
+		if user.Email == "admin@lanqin.local" {
+			defaultAdmin = user
+			break
+		}
+	}
+	if defaultAdmin.ID == "" || !defaultAdmin.Protected || defaultAdmin.Role != "admin" {
+		t.Fatalf("default admin should be protected super admin: %+v", defaultAdmin.User)
+	}
+	if code := admin.do("POST", "/api/admin/users/"+defaultAdmin.ID, map[string]any{
+		"displayName": "LanQin Admin",
+		"role":        "user",
+		"disabled":    false,
+	}, &errBody); code != http.StatusBadRequest {
+		t.Fatalf("default admin downgrade should be rejected code=%d body=%v", code, errBody)
+	}
+	if code := admin.do("POST", "/api/admin/users/"+defaultAdmin.ID, map[string]any{
+		"displayName": "LanQin Admin",
+		"role":        "admin",
+		"disabled":    true,
+	}, &errBody); code != http.StatusBadRequest {
+		t.Fatalf("default admin disable should be rejected code=%d body=%v", code, errBody)
+	}
+	if code := admin.do("DELETE", "/api/admin/users/"+defaultAdmin.ID, nil, &errBody); code != http.StatusBadRequest {
+		t.Fatalf("default admin delete should be rejected code=%d body=%v", code, errBody)
+	}
+}
+
 func TestMaildirSyncImportsRFC822(t *testing.T) {
 	a := newTestApp(t)
 	ctx := context.Background()
