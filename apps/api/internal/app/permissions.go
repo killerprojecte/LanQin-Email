@@ -79,6 +79,10 @@ const (
 )
 
 var legacyDefaultPermissionGroupIDs = []string{
+	"pg_permission_manager",
+	"pg_user_manager",
+	"pg_system_operator",
+	"pg_mail_operator",
 	PermissionGroupUserAdmin,
 	PermissionGroupPermissionAdmin,
 	PermissionGroupDomainAdmin,

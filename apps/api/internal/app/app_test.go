@@ -1174,6 +1174,37 @@ func TestFixedRolesProtectAdminRoutesAndDefaultAdmin(t *testing.T) {
 	}
 }
 
+func TestLegacySystemPermissionGroupsAreCleanedUp(t *testing.T) {
+	a := newTestApp(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	legacyIDs := []string{
+		"pg_permission_manager",
+		"pg_user_manager",
+		"pg_system_operator",
+		"pg_mail_operator",
+	}
+
+	for _, groupID := range legacyIDs {
+		if _, err := a.db.ExecContext(ctx, `INSERT INTO permission_groups(id,name,description,permissions_json,system,created_at,updated_at)
+			VALUES(?,?,?,?,1,?,?)`, groupID, "Legacy "+groupID, "", "[]", now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.ensureDefaultPermissionGroups(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, groupID := range legacyIDs {
+		var count int
+		if err := a.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM permission_groups WHERE id=?`, groupID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("legacy permission group %s was not removed", groupID)
+		}
+	}
+}
+
 func TestMaildirSyncImportsRFC822(t *testing.T) {
 	a := newTestApp(t)
 	ctx := context.Background()
